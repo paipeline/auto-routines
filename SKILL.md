@@ -1,45 +1,79 @@
 ---
 name: auto-routines
-description: Analyze a repository, interview the user about goal, automation appetite, and per-routine frequency, then install and evolve a finite-state set of repo-specific routines (hooks, scheduled tasks, loops, PR-comment agents, git hooks). A daily meta-routine adapts the set based on commits, PRs, CI, and routine logs; routines themselves can request mid-run evolution. Routines transition through PROPOSED → ACTIVE → (EVOLVING/STAGNANT/COMPLETED) → STOPPED. Invoke when the user runs `/auto-routines [init|evolve|status|stop|start|revert]` or asks to set up / iterate project automations.
+description: Install and evolve a finite-state set of repo-specific automations (scheduled tasks, hooks, git hooks, loops). After a one-time interview, a daily meta-routine adapts the set from signals (commits, PRs, CI, routine logs); routines themselves can request mid-run evolution. Invoke on `/auto-routines [init|evolve|status|stop|start|revert]` or when the user asks to set up project automations.
 ---
 
 # auto-routines
 
+> **TL;DR for the operator (you).** This skill installs real artifacts on disk and verifies them before declaring success. It does **not** stop at planning. Routines, when they fire, write code and open PRs. In goal-driven mode, one of the routines (`prd-implement`) drives the PRD forward on a schedule — without it the install is reactive-only.
+
 You are operating the `auto-routines` skill. The user wants their repository to run a self-evolving set of automations. Interview them once with explicit per-routine frequency choices, install routines as a finite-state machine, and from then on the daily `evolve` mode plus mid-run evolve requests adapt the set autonomously while always showing a plain-text status block (am/pm times, no mermaid) and gating risky changes behind a sanity check.
 
-**This skill is not a planner. It installs and writes code.** When `init` runs, it must produce real artifacts on disk: a `.git/hooks/post-commit` shell script, entries in `.claude/settings.json`, scheduled-task IDs returned from the MCP, per-routine SKILL.md files filled with concrete prompts (sourced from `templates/routine-catalog.yaml`). Routines themselves, when fired, must produce real diffs — they branch on `routines/<id>`, commit, push, open PRs. Never stop at "here's the plan, looks good?" — that's the failure mode this skill exists to fix.
+## Two failure modes this skill exists to prevent
 
-**Reactive maintenance is not enough.** The catalog ships a `prd-implement` archetype whose job is to push the PRD forward one slice per fire (read `.iteration/goal.md`, plan ahead, write code + tests, PR). In `goal-driven` mode the interview always proposes it. Without that routine the install only *reacts* to commits — it never *makes* feature progress on its own.
+1. **"Here's the plan, looks good?"** — `init` must produce a `.git/hooks/post-commit` shell script, entries in `.claude/settings.json`, scheduled-task IDs from the MCP, and per-routine SKILL.md files (filled from `templates/routine-catalog.yaml`). Step 7 verifies every artifact on disk; if any is missing it aborts with `.iteration/install-failed.md`.
+2. **"Reactive maintenance only."** — every routine, when fired, branches on `routines/<id>`, commits, pushes, opens a PR. The catalog's `prd-implement` archetype pushes the PRD forward one slice per fire (read `.iteration/goal.md`, plan ahead, write code + tests, PR). In `goal-driven` mode it's always proposed.
+
+## Files this skill manages
+
+```
+.iteration/
+  config.yaml              # routines registry, goal, mode, deps, neutralized_tasks
+  log.jsonl                # outcomes from each routine run (one line per fire)
+  evolve_requests.jsonl    # mid-run evolve requests (drained by `evolve`)
+  checkpoints.md           # iter SHAs for revert
+  plan.txt                 # current text status block (rewritten every run)
+  history/iter-NNN.md      # per-iteration summary
+  halted.md                # written when a dep check fails (deleted on resume)
+  sanity-failed-NNN.md     # written when a proposed config fails sanity
+  next-goal.md             # written when a goal-driven iteration goal is met
+.claude/
+  settings.json            # Claude Code hooks (merged) — includes the always-on Stop hook that drains evolve_requests
+  skills/<routine_id>/     # per-routine prompt skills (filled from templates/routine-skill.md)
+.git/hooks/post-commit     # only if a routine declares primitive: git-hook
+```
 
 ## Modes
 
 Detect mode from the user's invocation:
 
-- **No args, no `.iteration/` exists** → `init`
-- **No args, `.iteration/` exists** → `status`
-- **`init`** → run full init flow (re-running re-interviews, but preserves history)
-- **`evolve`** → run one iteration. Optional `--triggered-by <routine_id> --reason <text>` records the trigger.
-- **`status`** → print the text status block (goal, mode, routines table with am/pm schedules and FSM states, pending evolve requests, last iter)
-- **`stop <routine_id>`** → transition routine ACTIVE → STOPPED (neutralize the underlying task)
-- **`start <routine_id>`** → transition routine STAGNANT|STOPPED → ACTIVE (un-neutralize, re-arm)
-- **`revert <iter-NNN>`** → restore checkpoint
+| Invocation                                 | Mode    | What happens                                                              |
+| ------------------------------------------ | ------- | ------------------------------------------------------------------------- |
+| No args, no `.iteration/`                  | `init`  | Run full install flow (interview → render → confirm → install → verify).  |
+| No args, `.iteration/` exists              | `status`| Print the text status block.                                              |
+| `init`                                     | `init`  | Force re-interview (preserves history, re-installs).                      |
+| `evolve [--triggered-by <id> --reason …]`  | `evolve`| Run one meta iteration. Optional flags record the trigger.                |
+| `status`                                   | `status`| Print goal, mode, routines table (am/pm + FSM state), pending requests.   |
+| `stop <routine_id>`                        | `stop`  | Transition `ACTIVE → STOPPED`. Neutralize the underlying task.            |
+| `start <routine_id>`                       | `start` | Transition `STAGNANT|COMPLETED|STOPPED → ACTIVE`. Re-arm the task.        |
+| `revert <iter-NNN>`                        | `revert`| `git revert` back to the named checkpoint. Reconcile tasks afterwards.    |
 
 ## Guardrails (apply to every mode)
 
-1. **Always print the text status block inline** at the end of `init`, `evolve`, `status`, `stop`, `start`. Never use mermaid. Times must render as am/pm (e.g. `9:00 AM daily`, `5:00 PM weekdays`). Cron is internal; humans never see it in output unless they explicitly asked.
-2. **Sanity check before any apply**: run `scripts/sanity-check.py .iteration/config.yaml` (or against a proposed config). If it fails, halt and surface the report. Never apply broken config.
-3. **Checkpoint before any change in `evolve`/`stop`/`start`**: create a git commit `iter-NNN: <summary>` and record SHA in `.iteration/checkpoints.md`. The user must always be able to `revert` to the previous iter.
-4. **Dependency health check**: at start of every mode, verify `gh auth status` (if `deps.gh != none`) and every MCP listed in `config.yaml > deps.mcps`. If any fail, write `.iteration/halted.md` with the failure and STOP. On next invocation, recheck — if healthy, delete `halted.md` and continue.
-5. **Confirm before initial install**: after interview + render, show the proposed status block and ask the user to confirm. Subsequent `evolve` runs are fully auto (no confirm).
-6. **Never write to `.iteration/` from inside `init` until the user confirms.** Stage proposals in `/tmp/auto-routines-staging-<repo_slug>/` until confirmed; sanity-check runs against the staged file.
-7. **Ownership of scheduled tasks** — the `scheduled-tasks` MCP is per-user and shared across repos, and it sanitizes `taskId` to plain kebab-case. To make ownership reliable:
-   - **`taskId` format**: `auto-routines-<repo_slug>-<routine_id>` (all lowercase, all hyphen-separated). Meta uses `auto-routines-<repo_slug>-meta`.
-   - **Description is ground truth for ownership**: every task this skill creates MUST set its `description` to start with `[auto-routines:<repo_slug>]`.
-   - **Store the actual `task_id` per routine in `config.yaml`** under `routines[].task_id`, captured from the MCP response. Never re-derive at use time.
-   - **Before creating any task**: list and check whether the planned `taskId` already exists. If it does and is owned by us, reuse via `update_scheduled_task`; otherwise abort.
-   - **Orphan detection**: list all tasks, filter to our prefix, diff against `config.yaml`. Anything in the listing not in config is an orphan — neutralize.
-8. **Neutralize, don't delete (current MCP limitation).** The `scheduled-tasks` MCP exposes only `create`, `list`, `update`. To "remove" a task: `update_scheduled_task` with `enabled: false`, `cronExpression: "0 0 1 1 *"` (Jan-1-only), and a description rewritten to start with `[auto-routines:DELETED:<repo_slug>]`. Record under `config.yaml > neutralized_tasks`.
-9. **Slug normalization** — computed once at `init` and stored. `basename` → lowercase → strip non `[a-z0-9-]` → collapse runs of `-` → strip leading/trailing `-` → strip leading `auto-routines-` → if empty/digit-leading prepend `r-` → truncate to 32 → validate.
+These are the ground rules. Every mode below assumes them.
+
+1. **Always print the text status block inline.** End every `init` / `evolve` / `status` / `stop` / `start` with the block. No mermaid. Times render as am/pm (`9:00 AM daily`, `5:00 PM weekdays`). Cron stays internal — humans see it only if they explicitly ask.
+
+2. **Sanity-check before apply.** Run `scripts/sanity-check.py <config>` against the proposed config. On fail: halt, surface the report. Never apply broken config.
+
+3. **Checkpoint before any change.** `evolve` / `stop` / `start` each create a `iter-NNN: <summary>` commit and append the SHA to `.iteration/checkpoints.md`. The user must always be able to `revert`.
+
+4. **Dependency health check.** At the start of every mode, verify `gh auth status` (when `deps.gh != none`) and every MCP in `config.yaml > deps.mcps`. On fail: write `.iteration/halted.md`, STOP. Next invocation rechecks — on green, delete `halted.md` and continue.
+
+5. **Confirm before initial install.** After interview + render, show the proposed status block and ask the user to confirm. Subsequent `evolve` runs are fully auto.
+
+6. **Never write to `.iteration/` until the user confirms.** Stage proposals in `/tmp/auto-routines-staging-<repo_slug>/`. The sanity check runs against the staged file.
+
+7. **Ownership of scheduled tasks.** The `scheduled-tasks` MCP is per-user, shared across repos, and sanitizes `taskId` to kebab-case. To make ownership reliable:
+   - **`taskId` format**: `auto-routines-<repo_slug>-<routine_id>` (lowercase, hyphen-separated). Meta is `auto-routines-<repo_slug>-meta`.
+   - **Description is ground truth.** Every task we create has `description` starting with `[auto-routines:<repo_slug>]`.
+   - **Store `task_id` per routine in `config.yaml`** (`routines[].task_id`), captured from the MCP response. Never re-derive at use time.
+   - **Pre-create check.** List existing tasks before `create`. If the planned `taskId` already exists and is ours: reuse via `update_scheduled_task`. Else abort.
+   - **Orphan sweep.** List all tasks, filter to our prefix, diff against `config.yaml`. Anything in the listing not in config is an orphan — neutralize.
+
+8. **Neutralize, don't delete (MCP has no `delete`).** The MCP exposes `create`, `list`, `update` only. To "remove": `update_scheduled_task` with `enabled: false`, `cronExpression: "0 0 1 1 *"` (Jan-1-only), description rewritten to start with `[auto-routines:DELETED:<repo_slug>]`. Record under `config.yaml > neutralized_tasks`.
+
+9. **Slug normalization (once at init, stored).** `basename` → lowercase → strip non `[a-z0-9-]` → collapse `-` runs → strip leading/trailing `-` → strip leading `auto-routines-` → if empty or digit-leading prepend `r-` → truncate to 32 → validate.
 
 ## The finite state machine
 
@@ -73,11 +107,20 @@ STOPPED    → ACTIVE       only via explicit `/auto-routines start <id>` (reset
 
 ## Mode: `init`
 
-> **Install is mandatory.** This skill does not stop at planning. Every numbered
-> step below MUST run to completion before printing the final status block. If
-> any step fails, halt with a clear error — do NOT skip ahead to "looks good!"
-> or hand the user a plan and stop. Step 7 ("Verify") aborts if any artifact
-> is missing on disk or in the MCP listing.
+> **Install is mandatory.** This skill does not stop at planning. Every numbered step below MUST run to completion before printing the final status block. Step 7 ("Verify") aborts if any artifact is missing on disk or in the MCP listing.
+
+The eight steps below cluster into four phases:
+
+| Phase           | Steps | Purpose                                              |
+| --------------- | ----- | ---------------------------------------------------- |
+| **Preflight**   | 1–3   | Detect repo, identity, stack.                        |
+| **Interview**   | 4–5   | Ask the user; render + confirm.                      |
+| **Install**     | 6     | Write artifacts on disk + MCP.                       |
+| **Verify+ship** | 7–8   | Audit every artifact; print final status.            |
+
+---
+
+### Preflight (steps 1–3)
 
 1. **Preflight** — verify `git rev-parse --is-inside-work-tree`; check `gh auth status`; list connected MCPs.
 
@@ -85,7 +128,11 @@ STOPPED    → ACTIVE       only via explicit `/auto-routines start <id>` (reset
 
 3. **Analyze** — detect stack (`package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `Gemfile`, …); detect tests/CI; read `git log --oneline -50`; `gh pr list --state all --limit 20` if available; read `README*`.
 
-4. **Interview** (use `AskUserQuestion` for every step):
+---
+
+### Interview (steps 4–5)
+
+4. **Ask the user** (use `AskUserQuestion` for every step):
    - **Goal**: "What's the goal of this project (one sentence)?"
    - **Mode**: pick `goal-driven` or `fully-auto`.
    - **MCPs**: multi-select from connected MCPs.
@@ -110,7 +157,11 @@ STOPPED    → ACTIVE       only via explicit `/auto-routines start <id>` (reset
 
 5. **Render & confirm** — stage `config.yaml` at `/tmp/auto-routines-staging-<repo_slug>/config.yaml`. Run `python3 scripts/sanity-check.py /tmp/auto-routines-staging-<repo_slug>/config.yaml`. Render the text status block per "Status display". Ask the user to confirm via `AskUserQuestion`. Do NOT proceed to step 6 without explicit confirmation.
 
-6. **Install** — perform every sub-step in order. Each sub-step is mandatory. Write the artifacts described, do not just describe them.
+---
+
+### Install (step 6 — every sub-step is mandatory)
+
+6. **Install** — perform every sub-step in order. Write the artifacts described, do not just describe them.
 
    **6a. Create `.iteration/` skeleton** (relative to repo root):
    ```
@@ -190,6 +241,10 @@ STOPPED    → ACTIVE       only via explicit `/auto-routines start <id>` (reset
    **6f. Two-step commit (preserves `checkpoints.md` inside the iter commit):**
    1. `git add .iteration .claude .gitignore .git/hooks/post-commit 2>/dev/null; git commit -m "iter-001: install auto-routines"`
    2. `SHA=$(git rev-parse HEAD); printf 'iter-001: %s  %s\n' "$SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> .iteration/checkpoints.md; git add .iteration/checkpoints.md && git commit --amend --no-edit`
+
+---
+
+### Verify + ship (steps 7–8)
 
 7. **Verify install** — this step is what catches "I rendered a plan but installed nothing". For every routine in `config.yaml`:
    - `state: ACTIVE` in config.yaml
@@ -371,25 +426,6 @@ Notes column lifts from: most recent `iter-NNN.md` action involving this routine
 When proposing routines (in `init` interview or `evolve` decisions), prefer archetypes whose `stack_hints` match what step 3 ("Analyze") detected. Only invent a custom routine when no archetype fits.
 
 The catalog is treated as authoritative for `routine_prompt_body` unless the user types a custom prompt during the interview. This is what makes the skill "actually do work" rather than "render a plan."
-
-## Files this skill manages
-
-```
-.iteration/
-  config.yaml              # routines registry, goal, mode, deps, neutralized_tasks
-  log.jsonl                # outcomes from each routine run
-  evolve_requests.jsonl    # mid-run evolve requests (drained by `evolve`)
-  checkpoints.md           # iter SHAs for revert
-  plan.txt                 # current text status block (rewritten every run)
-  history/iter-NNN.md      # per-iteration summary
-  halted.md                # written when a dep check fails (deleted on resume)
-  sanity-failed-NNN.md     # written when a proposed config fails sanity
-  next-goal.md             # written when a goal-driven iteration goal is met
-.claude/
-  settings.json            # Claude Code hooks (merged) — includes the Stop hook that drains evolve_requests
-  skills/<routine_id>/     # per-routine prompt skills
-.git/hooks/post-commit     # only if a routine declares primitive: git-hook
-```
 
 ## Notes
 
