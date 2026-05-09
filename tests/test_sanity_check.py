@@ -28,7 +28,7 @@ def template_config() -> dict:
 
 @pytest.fixture
 def base_config() -> dict:
-    """Minimal valid config used as a starting point for negative tests."""
+    """Minimal valid schema-2 config used as a starting point for negative tests."""
     return {
         "schema_version": 2,
         "repo_slug": "demo-repo",
@@ -46,6 +46,38 @@ def base_config() -> dict:
         ],
         "neutralized_tasks": [],
         "meta": {"cron": "0 9 * * *", "anti_flap_window": 7},
+    }
+
+
+@pytest.fixture
+def schema3_config() -> dict:
+    """Minimal valid schema-3 config — FSM state, human-readable schedule, etc."""
+    return {
+        "schema_version": 3,
+        "repo_slug": "demo-repo",
+        "goal": "ship v1",
+        "mode": "fully-auto",
+        "deps": {"gh": "required", "mcps": ["scheduled-tasks"]},
+        "routines": [
+            {
+                "id": "pr-watcher",
+                "state": "ACTIVE",
+                "primitive": "scheduled",
+                "trigger": {"cron": "*/30 * * * *", "human": "every 30 minutes"},
+                "purpose": "watch PRs",
+                "automation_level": "auto",
+                "self_evolve": True,
+                "stagnation_threshold": 7,
+            }
+        ],
+        "neutralized_tasks": [],
+        "meta": {
+            "cron": "0 9 * * *",
+            "human": "9:00 AM daily",
+            "anti_flap_window": 7,
+            "default_stagnation_threshold": 7,
+            "process_evolve_requests": True,
+        },
     }
 
 
@@ -297,3 +329,96 @@ def test_neutralized_taskid_cannot_alias_active_routine(base_config):
 )
 def test_cron_field_ok(field, lo, hi, expected):
     assert sanity.cron_field_ok(field, lo, hi) is expected
+
+
+# ---------------------------------------------------------------------------
+# Schema 3 — finite state machine + human-readable triggers + self-evolve
+# ---------------------------------------------------------------------------
+
+def test_schema3_template_passes(schema3_config):
+    assert sanity.check(schema3_config) == []
+
+
+def test_schema3_state_required(schema3_config):
+    del schema3_config["routines"][0]["state"]
+    errors = sanity.check(schema3_config)
+    assert any("state" in e for e in errors), errors
+
+
+def test_schema2_state_optional(base_config):
+    # Backward compat: schema 2 doesn't require state
+    assert sanity.check(base_config) == []
+    base_config["routines"][0]["state"] = "ACTIVE"
+    assert sanity.check(base_config) == []
+
+
+@pytest.mark.parametrize(
+    "state",
+    ["PROPOSED", "ACTIVE", "EVOLVING", "STAGNANT", "COMPLETED", "STOPPED"],
+)
+def test_all_fsm_states_accepted(schema3_config, state):
+    schema3_config["routines"][0]["state"] = state
+    assert sanity.check(schema3_config) == []
+
+
+@pytest.mark.parametrize("bogus", ["RUNNING", "active", "Done", "", "unknown"])
+def test_invalid_state_rejected(schema3_config, bogus):
+    schema3_config["routines"][0]["state"] = bogus
+    errors = sanity.check(schema3_config)
+    assert any("state" in e for e in errors), errors
+
+
+def test_schema3_trigger_human_required_with_cron(schema3_config):
+    del schema3_config["routines"][0]["trigger"]["human"]
+    errors = sanity.check(schema3_config)
+    assert any("trigger.human" in e for e in errors), errors
+
+
+def test_trigger_human_must_be_string(schema3_config):
+    schema3_config["routines"][0]["trigger"]["human"] = 42
+    errors = sanity.check(schema3_config)
+    assert any("trigger.human" in e for e in errors)
+
+
+def test_schema3_meta_human_required(schema3_config):
+    del schema3_config["meta"]["human"]
+    errors = sanity.check(schema3_config)
+    assert any("meta.human" in e for e in errors), errors
+
+
+def test_self_evolve_must_be_bool(schema3_config):
+    schema3_config["routines"][0]["self_evolve"] = "yes"
+    errors = sanity.check(schema3_config)
+    assert any("self_evolve" in e for e in errors)
+
+
+@pytest.mark.parametrize("bad", [0, -1, "seven", 1.5, None])
+def test_stagnation_threshold_must_be_positive_int(schema3_config, bad):
+    schema3_config["routines"][0]["stagnation_threshold"] = bad
+    errors = sanity.check(schema3_config)
+    assert any("stagnation_threshold" in e for e in errors), errors
+
+
+def test_meta_default_stagnation_threshold_must_be_positive_int(schema3_config):
+    schema3_config["meta"]["default_stagnation_threshold"] = 0
+    errors = sanity.check(schema3_config)
+    assert any("default_stagnation_threshold" in e for e in errors)
+
+
+def test_meta_process_evolve_requests_must_be_bool(schema3_config):
+    schema3_config["meta"]["process_evolve_requests"] = "true"
+    errors = sanity.check(schema3_config)
+    assert any("process_evolve_requests" in e for e in errors)
+
+
+# ---------------------------------------------------------------------------
+# FSM helpers exposed by sanity module (used by SKILL.md / status command)
+# ---------------------------------------------------------------------------
+
+def test_state_set_constants_exposed():
+    assert sanity.ROUTINE_STATES == {
+        "PROPOSED", "ACTIVE", "EVOLVING", "STAGNANT", "COMPLETED", "STOPPED",
+    }
+    assert sanity.FIRING_STATES == {"ACTIVE", "EVOLVING"}
+    assert sanity.PAUSED_STATES == {"STAGNANT", "COMPLETED"}
+    assert sanity.TERMINAL_STATES == {"STOPPED"}

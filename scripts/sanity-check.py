@@ -52,6 +52,17 @@ HOOK_EVENTS = {
     "PreToolUse", "PostToolUse", "Notification", "Stop", "SubagentStop",
     "UserPromptSubmit", "PreCompact", "SessionStart", "SessionEnd",
 }
+# Finite state machine for routines.
+# Active firing states:    ACTIVE, EVOLVING (transient)
+# Re-openable paused:      STAGNANT, COMPLETED
+# Pre-confirm:             PROPOSED
+# Real terminal:           STOPPED
+ROUTINE_STATES = {
+    "PROPOSED", "ACTIVE", "EVOLVING", "STAGNANT", "COMPLETED", "STOPPED",
+}
+TERMINAL_STATES = {"STOPPED"}                              # cannot leave
+PAUSED_STATES = {"STAGNANT", "COMPLETED"}                  # re-openable
+FIRING_STATES = {"ACTIVE", "EVOLVING"}                     # routine may fire
 SLUG_MAX = 32          # keep room for "auto-routines-" prefix and "-<routine_id>" suffix
 TASK_ID_MAX = 100      # MCP-side reasonable bound
 
@@ -176,8 +187,32 @@ def check(config: dict) -> list[str]:
             errors.append(f"{prefix} primitive must be one of {PRIMITIVES}, got {prim!r}")
         if r.get("automation_level") and r["automation_level"] not in LEVELS:
             errors.append(f"{prefix} automation_level must be one of {LEVELS}")
+        # FSM state — required from schema_version 3 onward
+        if "state" in r:
+            if r["state"] not in ROUTINE_STATES:
+                errors.append(
+                    f"{prefix} state must be one of {sorted(ROUTINE_STATES)}, got {r['state']!r}"
+                )
+        elif config.get("schema_version", 0) >= 3:
+            errors.append(f"{prefix} missing key: state (required from schema_version 3)")
+        # self_evolve flag — gates mid-run /evolve requests
+        if "self_evolve" in r and not isinstance(r["self_evolve"], bool):
+            errors.append(f"{prefix} self_evolve must be a bool")
+        # stagnation_threshold — must be a positive int when set
+        if "stagnation_threshold" in r:
+            st = r["stagnation_threshold"]
+            if not isinstance(st, int) or st < 1:
+                errors.append(f"{prefix} stagnation_threshold must be a positive integer")
         # 6. trigger fields per primitive
         trig = r.get("trigger", {}) or {}
+        # human-readable schedule must be present when cron is (schema 3+)
+        if config.get("schema_version", 0) >= 3 and "cron" in trig and "human" not in trig:
+            errors.append(
+                f"{prefix} trigger.human is required when trigger.cron is set "
+                f"(schema 3+). Pair the cron {trig['cron']!r} with a phrase like 'every 30 minutes'."
+            )
+        if "human" in trig and not isinstance(trig["human"], str):
+            errors.append(f"{prefix} trigger.human must be a string")
         if prim in {"scheduled", "pr-poll"}:
             if "cron" not in trig:
                 errors.append(f"{prefix} primitive {prim!r} requires trigger.cron")
@@ -222,6 +257,16 @@ def check(config: dict) -> list[str]:
             errors.append(f"meta.cron invalid: {msg}")
     if "anti_flap_window" in meta and not isinstance(meta["anti_flap_window"], int):
         errors.append("meta.anti_flap_window must be an integer")
+    if "default_stagnation_threshold" in meta:
+        ds = meta["default_stagnation_threshold"]
+        if not isinstance(ds, int) or ds < 1:
+            errors.append("meta.default_stagnation_threshold must be a positive integer")
+    if "process_evolve_requests" in meta and not isinstance(meta["process_evolve_requests"], bool):
+        errors.append("meta.process_evolve_requests must be a bool")
+    if config.get("schema_version", 0) >= 3 and "human" not in meta:
+        errors.append(
+            "meta.human is required (schema 3+). e.g. '9:00 AM daily' to pair with meta.cron."
+        )
 
     # 12. neutralized_tasks (optional, but if present must be a list of dicts)
     nts = config.get("neutralized_tasks", [])

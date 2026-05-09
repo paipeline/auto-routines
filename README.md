@@ -23,7 +23,7 @@
 - **`fully-auto`** — the meta-agent picks direction from signals alone (CI flake rate, PR queue depth, doc drift, commit cadence). The repo keeps itself healthy.
 - **`goal-driven`** — you set an iteration goal. The meta-agent picks routines that close the gap to it.
 
-Every change the meta-agent makes is a git commit. Revert any of them with one command. You stay in the loop via a mermaid plan that's refreshed after every run.
+Every change the meta-agent makes is a git commit. Revert any of them with one command. You stay in the loop via a plain-text status block (am/pm times, FSM state per routine, no cron, no mermaid) refreshed after every run.
 
 ---
 
@@ -60,31 +60,41 @@ Requires `gh` CLI, Python 3.9+ with `pyyaml`, and the `scheduled-tasks` MCP. The
 $ /auto-routines evolve
 
 sanity check: OK
-checkpoint: iter-008  (sha 3a1f9c2)
+checkpoint: iter-010 (sha 3a1f9c2) — triggered by: pr-ci-watcher
 
 changes:
-  + added doc-drift-fixer (cron: 0 17 * * 1-5) — README diverging from src/api/
-  ~ retuned pr-ci-watcher 30m → 15m — CI flake rate tripled this week
-  - neutralized weekly-dep-audit — 0 useful findings in 11 runs
+  + added release-tag-checker (every git commit) — release commits without version bump
+  ~ retuned pr-ci-watcher every 30 minutes → every 15 minutes — CI flake rate tripled
+  → completed weekly-dep-audit — success_criterion met (0 vulns 4 runs running)
+  → stagnant doc-drift-fixer — 11 runs, 0 useful, paused (re-openable)
 ```
 
-```mermaid
-flowchart TD
-  classDef node fill:#fff,stroke:#000,color:#000
+```
+$ /auto-routines status
 
-  GOAL["Goal: ship v1.0 with great test coverage<br/>Mode: fully-auto"]:::node
-  META["Meta /auto-routines evolve<br/>cron: 0 9 * * *"]:::node
-  GOAL --> META
+goal:        ship v1.0 with great test coverage    mode: fully-auto
+meta evolve: 9:00 AM daily   ─   last fired 2h ago, next 9:00 AM tomorrow
 
-  T1["every 15 min"]:::node --> R1["pr-ci-watcher"]:::node
-  T2["18:00 daily"]:::node --> R2["daily-digest"]:::node
-  T3["weekdays 17:00"]:::node --> R3["doc-drift-fixer"]:::node
-  T4["git post-commit"]:::node --> R4["test-runner-nudge"]:::node
+routine            schedule                state       runs  useful  noisy   notes
+─────────────────  ──────────────────────  ──────────  ────  ──────  ─────   ──────────────────────
+pr-ci-watcher      every 15 minutes        ACTIVE       147     132     15   retuned at iter-010
+release-checker    on every git commit     ACTIVE         7       7      0   added at iter-010
+daily-digest       6:00 PM daily           ACTIVE        12      12      0
+doc-drift-fixer    5:00 PM weekdays        STAGNANT      11       0      0   paused at iter-009
+weekly-dep-audit   9:00 AM Mondays         COMPLETED      4       2      0   goal: 0 vulns reached
 
-  META -.->|may tune| R1
-  META -.->|may tune| R2
-  META -.->|may tune| R3
-  META -.->|may tune| R4
+evolve requests pending: 0
+last iter:               iter-010 — 2h ago — triggered by: pr-ci-watcher
+```
+
+No mermaid, no cron syntax, no black box. Times are am/pm. State is one of:
+
+```
+ACTIVE     firing on schedule
+EVOLVING   meta-agent is currently re-evaluating it (transient)
+STAGNANT   no incremental work for N runs — paused, re-openable
+COMPLETED  success_criterion met — paused, re-openable
+STOPPED    user-disabled or meta-removed — terminal (run /auto-routines start to revive)
 ```
 
 ---
@@ -93,9 +103,11 @@ flowchart TD
 
 Three weeks into a side project, the discipline you started with has rotted. Tests skipped, README stale, CI red for two days.
 
-You run `/auto-routines` once. It installs a post-commit nudge, a 15-minute PR watcher, an 18:00 daily digest, a weekday doc-drift fixer, and a daily meta-routine.
+You run `/auto-routines` once. The interview asks the goal, the mode, and — for each candidate routine — the **frequency** in plain English (`every 15 minutes`, `5:00 PM weekdays`, `on every git commit`), an optional **success criterion** ("CI green on last 50 PRs"), and whether the routine **may evolve itself**.
 
-By week four the meta-agent has neutralized the drift fixer (no signal), retuned the PR watcher 30m → 15m (CI got flaky), and **added a release-tag-checker on its own** — because it noticed you keep forgetting to bump versions. Each change is `iter-008`, `iter-009`, `iter-010` in your git log.
+By week four the meta-agent has marked the drift fixer **STAGNANT** (no signal in 11 runs), retuned the PR watcher to every 15 minutes (CI got flaky), and **added a release-tag-checker on its own** — because it noticed you keep forgetting to bump versions. The dep-audit routine hit its **COMPLETED** state (0 vulns four runs running) and stopped firing. None of it is in your way.
+
+Halfway through week three, the PR watcher itself dropped a line into `.iteration/evolve_requests.jsonl` saying *"CI flake rate is now 0%, recommend reducing my frequency."* The meta-agent picked it up at 9:00 AM the next morning and retuned. **Routines can ask the skill to re-evaluate them.**
 
 You never maintained the discipline. The repo did.
 
@@ -104,10 +116,13 @@ You never maintained the discipline. The repo did.
 ## Commands
 
 ```
-/auto-routines              # init if first run, else show status
-/auto-routines evolve       # run one iteration (the meta-routine calls this daily)
-/auto-routines plan         # re-render plan.mmd
-/auto-routines revert iter-007
+/auto-routines                                       # init if first run, else show status
+/auto-routines evolve                                # run one iteration (meta calls this daily)
+/auto-routines evolve --triggered-by <id> --reason <text>   # mid-run, called by routines
+/auto-routines status                                # text status block (am/pm, FSM state)
+/auto-routines stop <routine_id>                     # ACTIVE → STOPPED
+/auto-routines start <routine_id>                    # STAGNANT|STOPPED → ACTIVE
+/auto-routines revert iter-007                       # restore checkpoint
 ```
 
 ---
