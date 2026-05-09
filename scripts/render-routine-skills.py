@@ -29,6 +29,13 @@ INSTALLED_AT = dt.datetime.now().astimezone().isoformat(timespec="seconds")
 
 # Per-routine context that doesn't fit cleanly in the catalog body.
 ROUTINE_SPECIFIC_INPUTS = {
+    "coordinator": (
+        "- `python3 scripts/coordinator-brief.py` (the structured brief — "
+        "**always** run this first; it's pure shell, no LLM tokens).\n"
+        "- `.iteration/goal.md` (only after the brief flags PRD as the lever).\n"
+        "- `.claude/skills/<routine_id>/SKILL.md` for the routine you decide "
+        "to dispatch — read it then, not preemptively."
+    ),
     "prd-implement": (
         "- `.iteration/goal.md` (the canonical PRD — required).\n"
         "- `.iteration/tasks.md` (cached task breakdown, if present).\n"
@@ -112,21 +119,36 @@ def render_one(routine: dict) -> str:
     return text
 
 
-def main() -> int:
-    skills_dir = ROOT / ".claude" / "skills"
-    skills_dir.mkdir(parents=True, exist_ok=True)
+def render_skills(routines: list[dict], output_dir: Path) -> list[Path]:
+    """Render SKILL.md for each routine into ``output_dir/<routine_id>/SKILL.md``.
 
-    for routine in CONFIG["routines"]:
+    Returns the list of written file paths. Exits with an error message if an
+    archetype is missing from the catalog or a placeholder is left unfilled.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    for routine in routines:
         rid = routine["id"]
-        out_dir = skills_dir / rid
+        out_dir = output_dir / rid
         out_dir.mkdir(parents=True, exist_ok=True)
         out_file = out_dir / "SKILL.md"
         rendered = render_one(routine)
-        # Sanity: no leftover {{placeholders}}
         if "{{" in rendered or "}}" in rendered:
-            sys.exit(f"unfilled placeholder in {out_file}: {rendered[rendered.find('{{'):rendered.find('}}')+2]}")
+            sys.exit(
+                f"unfilled placeholder in {out_file}: "
+                f"{rendered[rendered.find('{{'):rendered.find('}}') + 2]}"
+            )
         out_file.write_text(rendered)
-        print(f"wrote {out_file.relative_to(ROOT)}")
+        written.append(out_file)
+    return written
+
+
+def main() -> int:
+    skills_dir = ROOT / ".claude" / "skills"
+    written = render_skills(CONFIG["routines"], skills_dir)
+    for path in written:
+        print(f"wrote {path.relative_to(ROOT)}")
     return 0
 
 
