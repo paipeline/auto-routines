@@ -61,7 +61,7 @@ Append exactly one JSON line to `.iteration/log.jsonl` per fire:
 
 ```json
 {
-  "ts": "<iso8601>",
+  "ts": "<iso8601 — local time with offset, e.g. 2026-05-09T17:03:00-0700; never UTC `Z`>",
   "routine": "{{routine_id}}",
   "outcome": "ok|noop|warn|err",
   "summary": "<one line — include PR url if you opened one>",
@@ -69,6 +69,11 @@ Append exactly one JSON line to `.iteration/log.jsonl` per fire:
   "last_fire_sha": "<git rev-parse HEAD>"
 }
 ```
+
+Generate `ts` with `date +%Y-%m-%dT%H:%M:%S%z` (NOT `date -u`). Logs are
+read by humans on their local machine — UTC `Z` makes them unreadable
+without mental arithmetic. Cron is also local time per the
+`scheduled-tasks` MCP, so log times match the schedule the user sees.
 
 `increment_signal` MUST be `true` exactly when you produced something useful
 (a commit, a PR, a comment, a fix, a generated test, a doc update). The meta-

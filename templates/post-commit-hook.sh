@@ -29,7 +29,7 @@ mkdir -p "$REPO_ROOT/.iteration"
 touch "$HOOK_LOG"
 
 # Trap any error so we never block a commit.
-trap 'echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"hook\":\"post-commit\",\"outcome\":\"err\",\"summary\":\"hook failed at line $LINENO\"}" >> "$LOG" 2>/dev/null; exit 0' ERR
+trap 'echo "{\"ts\":\"$(date +%Y-%m-%dT%H:%M:%S%z)\",\"hook\":\"post-commit\",\"outcome\":\"err\",\"summary\":\"hook failed at line $LINENO\"}" >> "$LOG" 2>/dev/null; exit 0' ERR
 
 # {{routine_dispatch_block}}
 #
@@ -38,7 +38,7 @@ trap 'echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"hook\":\"post-commit\",
 #
 #   ( claude --dangerously-skip-permissions -p "/commit-tests" \
 #       >> "$HOOK_LOG" 2>&1 \
-#       && echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"routine\":\"commit-tests\",\"outcome\":\"ok\"}" >> "$LOG" \
+#       && echo "{\"ts\":\"$(date +%Y-%m-%dT%H:%M:%S%z)\",\"routine\":\"commit-tests\",\"outcome\":\"ok\"}" >> "$LOG" \
 #     ) &
 #
 # All routines are dispatched in subshells with `&` so the commit returns
