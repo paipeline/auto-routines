@@ -1,0 +1,38 @@
+name: Feature request
+description: Propose a new routine, primitive, or skill behavior.
+labels: [enhancement, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: check if an existing routine could be retuned to do this. Adding routines to the default set has a high bar.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: The user pain, not the proposed implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed routine / change
+      placeholder: |
+        - id:
+        - primitive: scheduled | hook | git-hook | loop | pr-poll
+        - trigger:
+        - purpose:
+        - automation_level:
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - label: I would be willing to PR this myself
+        - label: This belongs in the default set (rather than a third-party routine)

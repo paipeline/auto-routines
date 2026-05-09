@@ -1,0 +1,52 @@
+name: Bug report
+description: Something in auto-routines is misbehaving.
+labels: [bug, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. The faster we can reproduce it, the faster it gets fixed.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Plain-English description of the unexpected behavior.
+      placeholder: e.g. "Running /auto-routines evolve crashed with KeyError on neutralized_tasks"
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Smallest steps to trigger this.
+      placeholder: |
+        1. Fresh repo
+        2. /auto-routines
+        3. Answer "fully-auto" / "ship v1"
+        4. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      placeholder: |
+        - OS:
+        - Claude Code version:
+        - Python version:
+        - gh version:
+        - scheduled-tasks MCP version:
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log excerpts
+      description: Paste from `.iteration/log.jsonl`, `.iteration/halted.md`, or terminal output.
+      render: shell
