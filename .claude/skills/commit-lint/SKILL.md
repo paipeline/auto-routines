@@ -1,6 +1,6 @@
 ---
 name: commit-lint
-description: Run linters after every commit; auto-fix and PR when violations exist. — installed by auto-routines on 2026-05-09T22:16:01+02:00, iter-1. Invoked by git-hook trigger (on every git commit).
+description: Run linters after every commit; auto-fix and PR when violations exist. — installed by auto-routines on 2026-05-09T22:37:38+02:00, iter-1. Invoked by git-hook trigger (on every git commit).
 ---
 
 # commit-lint
@@ -17,7 +17,7 @@ on every git commit
 ## Inputs to read at fire time
 - `.iteration/config.yaml` — read your own entry under `routines:`. Honor `automation_level` and `state` (see below).
 - Recent `git log` since last fire of this routine (look up your `last_fire_sha` in `.iteration/log.jsonl`).
-- - `git diff HEAD~1 HEAD` for the changed files.
+- `git diff HEAD~1 HEAD` for the changed files.
 - Available linters detected from `pyproject.toml` (ruff, mypy) and `package.json` (eslint, prettier) if present.
 
 ## What to do

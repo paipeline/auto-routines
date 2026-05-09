@@ -17,7 +17,7 @@ description: {{purpose}} — installed by auto-routines on {{installed_at}}, ite
 ## Inputs to read at fire time
 - `.iteration/config.yaml` — read your own entry under `routines:`. Honor `automation_level` and `state` (see below).
 - Recent `git log` since last fire of this routine (look up your `last_fire_sha` in `.iteration/log.jsonl`).
-- {{routine_specific_inputs}}
+{{routine_specific_inputs}}
 
 ## What to do
 

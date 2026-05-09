@@ -1,6 +1,6 @@
 ---
 name: commit-tests
-description: Run pytest after every commit; if it fails, open a fix PR. — installed by auto-routines on 2026-05-09T22:16:01+02:00, iter-1. Invoked by git-hook trigger (on every git commit).
+description: Run pytest after every commit; if it fails, open a fix PR. — installed by auto-routines on 2026-05-09T22:37:38+02:00, iter-1. Invoked by git-hook trigger (on every git commit).
 ---
 
 # commit-tests
@@ -17,7 +17,7 @@ all tests green for 50 consecutive commits
 ## Inputs to read at fire time
 - `.iteration/config.yaml` — read your own entry under `routines:`. Honor `automation_level` and `state` (see below).
 - Recent `git log` since last fire of this routine (look up your `last_fire_sha` in `.iteration/log.jsonl`).
-- - `git show HEAD --stat` and `git show HEAD -- <changed files>` for the just-committed change.
+- `git show HEAD --stat` and `git show HEAD -- <changed files>` for the just-committed change.
 - The pytest output (run `pytest -q` with a 5-minute timeout).
 
 ## What to do

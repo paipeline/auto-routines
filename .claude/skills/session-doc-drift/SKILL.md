@@ -1,6 +1,6 @@
 ---
 name: session-doc-drift
-description: Weekly, update README/SKILL.md/catalog when they diverge from code. — installed by auto-routines on 2026-05-09T22:16:01+02:00, iter-1. Invoked by scheduled trigger (5:00 PM Mondays).
+description: Weekly, update README/SKILL.md/catalog when they diverge from code. — installed by auto-routines on 2026-05-09T22:37:38+02:00, iter-1. Invoked by scheduled trigger (5:00 PM Mondays).
 ---
 
 # session-doc-drift
@@ -17,7 +17,7 @@ docs in sync with code for 7 consecutive sessions
 ## Inputs to read at fire time
 - `.iteration/config.yaml` — read your own entry under `routines:`. Honor `automation_level` and `state` (see below).
 - Recent `git log` since last fire of this routine (look up your `last_fire_sha` in `.iteration/log.jsonl`).
-- - `README.md`, `SKILL.md`, `templates/routine-catalog.yaml`, `templates/routine-skill.md` (the docs that must stay in sync).
+- `README.md`, `SKILL.md`, `templates/routine-catalog.yaml`, `templates/routine-skill.md` (the docs that must stay in sync).
 - `git diff` of the session against these files to spot which doc has fallen behind code.
 
 ## What to do
