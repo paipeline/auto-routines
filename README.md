@@ -23,8 +23,7 @@ Most automation tools install once and rot. This one rewrites itself.
 
 ```mermaid
 flowchart TD
-  classDef node fill:#fff,stroke:#000,color:#000;
-  linkStyle default stroke:#000;
+  classDef node fill:#fff,stroke:#000,color:#000
 
   A["/auto-routines init"]:::node --> B[analyze stack, tests, CI, git activity]:::node
   B --> C[interview: goal, mode, MCPs, candidate routines]:::node
@@ -75,8 +74,7 @@ changes:
 
 ```mermaid
 flowchart TD
-  classDef node fill:#fff,stroke:#000,color:#000;
-  linkStyle default stroke:#000;
+  classDef node fill:#fff,stroke:#000,color:#000
 
   GOAL["Goal: ship v1.0 with great test coverage<br/>Mode: fully-auto"]:::node
   META["Meta /auto-routines evolve<br/>cron: 0 9 * * * — next: tomorrow 09:00"]:::node
