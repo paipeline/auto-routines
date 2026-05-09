@@ -8,7 +8,6 @@ drifts back toward "just print findings."
 """
 from __future__ import annotations
 
-from pathlib import Path
 
 import pytest
 import yaml
@@ -167,7 +166,6 @@ def test_post_commit_template_exists():
 
 
 def test_post_commit_template_executable():
-    import os
     mode = HOOK_TEMPLATE.stat().st_mode
     assert mode & 0o100, "post-commit-hook.sh must be executable in the repo"
 

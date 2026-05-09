@@ -19,8 +19,8 @@ routines:
     enabled: true
     primitive: scheduled
     trigger:
-      cron: "0 */4 * * *"
-      human: "every 4 hours"
+      cron: "0 */12 * * *"
+      human: "every 12 hours"
     purpose: "On a schedule, pick the next unimplemented slice from .iteration/goal.md, design it, write code+tests, commit and open a PR."
     success_criterion: "all tasks in .iteration/goal.md marked done"
     stagnation_threshold: 5
@@ -83,9 +83,9 @@ routines:
     enabled: true
     primitive: scheduled
     trigger:
-      cron: "0 17 * * 1-5"
-      human: "5:00 PM weekdays"
-    purpose: "On weekday evenings, update README/SKILL.md/catalog when they diverge from code."
+      cron: "0 17 * * 1"
+      human: "5:00 PM Mondays"
+    purpose: "Weekly, update README/SKILL.md/catalog when they diverge from code."
     success_criterion: "docs in sync with code for 7 consecutive sessions"
     stagnation_threshold: 7
     self_evolve: true
@@ -134,3 +134,4 @@ meta:
   anti_flap_window: 3
   default_stagnation_threshold: 5
   process_evolve_requests: true
+  budget: medium  # see SKILL.md "Budget → cadence presets"

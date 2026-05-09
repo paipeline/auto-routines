@@ -37,11 +37,33 @@ broken installs, or routines that drift back to "analyze only."
 ### Skill UX
 - [ ] Better progress reporting during `init` — currently the user sees a long
       silence then a wall of status. Stream phase headers as we go.
-- [ ] `/auto-routines status --routine <id>` to drill into one routine's stats.
+- [x] `/auto-routines status --routine <id>` to drill into one routine's stats.
+      (Implemented in `scripts/status.py --routine <id>`, no LLM tokens.)
 - [ ] `/auto-routines test-fire <routine_id>` to manually fire one routine
       without waiting for cron — useful for debugging.
 - [ ] Surface the first routine PR opened by a fresh install in the welcome
       output ("your first auto-PR will land at ~6:00 PM").
+
+### Token frugality (added iter-002 — user feedback: skill is consuming too many tokens)
+- [x] `/auto-routines status` MUST be a pure-script call with no Claude tokens.
+      Added `scripts/status.py`; SKILL.md `Mode: status` now invokes it directly.
+      Tests in `tests/test_status.py` pin the no-subprocess/no-network contract.
+- [x] Add `meta.budget: low|medium|high|custom` to schema-3 with a cadence
+      preset table in SKILL.md. Self-hosted install bumped to `medium`.
+- [ ] Install step 6a should copy `scripts/status.py` from the skill directory
+      into the consumer repo so `/auto-routines status` works there too.
+      Currently the script only ships in this repo — consumers need it copied
+      relative to their repo root. Add to step 6a; cover with an integration
+      test that runs `init` against a temp repo and checks the script lands.
+- [ ] `daily-digest` low/medium tier — provide a pure-shell variant that skips
+      Claude entirely (just `git log` + `gh pr list` formatted as Markdown).
+      Catalog should branch on `meta.budget`.
+- [ ] Add a `/auto-routines budget <tier>` command that re-applies the cadence
+      preset table to the live config + scheduled tasks. Lets the user dial up
+      or down without re-running the full interview.
+- [ ] Trim the per-routine SKILL.md preamble. The current rendered template
+      is ~3KB of boilerplate per fire; extract the FSM/state-handling section
+      into a single shared file the routine can `cat` once at start.
 
 ### Documentation
 - [ ] Write a "first 24 hours" walkthrough in `docs/first-24h.md`.

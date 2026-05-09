@@ -1,15 +1,15 @@
 ---
 name: session-doc-drift
-description: On weekday evenings, update README/SKILL.md/catalog when they diverge from code. — installed by auto-routines on 2026-05-09T19:24:44+02:00, iter-1. Invoked by scheduled trigger (5:00 PM weekdays).
+description: Weekly, update README/SKILL.md/catalog when they diverge from code. — installed by auto-routines on 2026-05-09T22:16:01+02:00, iter-1. Invoked by scheduled trigger (5:00 PM Mondays).
 ---
 
 # session-doc-drift
 
 ## Purpose
-On weekday evenings, update README/SKILL.md/catalog when they diverge from code.
+Weekly, update README/SKILL.md/catalog when they diverge from code.
 
 ## Trigger
-5:00 PM weekdays
+5:00 PM Mondays
 
 ## Success criterion
 docs in sync with code for 7 consecutive sessions
