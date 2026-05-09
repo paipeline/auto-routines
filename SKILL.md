@@ -158,7 +158,7 @@ STOPPED    → ACTIVE       only via explicit `/auto-routines start <id>` (reset
         ```bash
         ( claude --dangerously-skip-permissions -p "/<routine_id>" \
             >> "$HOOK_LOG" 2>&1 \
-            && echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"routine\":\"<routine_id>\",\"outcome\":\"ok\"}" >> "$LOG" \
+            && echo "{\"ts\":\"$(date +%Y-%m-%dT%H:%M:%S%z)\",\"routine\":\"<routine_id>\",\"outcome\":\"ok\"}" >> "$LOG" \
           ) &
         ```
      3. Write the assembled file to `.git/hooks/post-commit`. `chmod +x .git/hooks/post-commit`.
@@ -189,7 +189,7 @@ STOPPED    → ACTIVE       only via explicit `/auto-routines start <id>` (reset
 
    **6f. Two-step commit (preserves `checkpoints.md` inside the iter commit):**
    1. `git add .iteration .claude .gitignore .git/hooks/post-commit 2>/dev/null; git commit -m "iter-001: install auto-routines"`
-   2. `SHA=$(git rev-parse HEAD); printf 'iter-001: %s  %s\n' "$SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> .iteration/checkpoints.md; git add .iteration/checkpoints.md && git commit --amend --no-edit`
+   2. `SHA=$(git rev-parse HEAD); printf 'iter-001: %s  %s\n' "$SHA" "$(date +%Y-%m-%dT%H:%M:%S%z)" >> .iteration/checkpoints.md; git add .iteration/checkpoints.md && git commit --amend --no-edit`
 
 7. **Verify install** — this step is what catches "I rendered a plan but installed nothing". For every routine in `config.yaml`:
    - `state: ACTIVE` in config.yaml
@@ -397,6 +397,7 @@ The catalog is treated as authoritative for `routine_prompt_body` unless the use
 - Never silently disable a routine. Always log to `history/iter-NNN.md` why.
 - Anti-flap: a routine auto-removed twice may not be re-proposed within `meta.anti_flap_window` iters.
 - Logs in `log.jsonl` are append-only. Each line: `{ts, routine, outcome, summary, accepted_by_user?, increment_signal?}`. The `increment_signal` boolean (true if the routine produced something useful this run) feeds stagnation detection — set it from the routine's own prompt logic.
+- **All timestamps are local time with offset, never UTC.** Generate with `date +%Y-%m-%dT%H:%M:%S%z`. The `scheduled-tasks` MCP evaluates cron in the user's local timezone, so writing logs in UTC creates a confusing mismatch ("scheduled at 9 AM, log says 16:00Z, was that 9 AM or noon?"). Use local time everywhere we write to disk: `log.jsonl`, `evolve_requests.jsonl`, `checkpoints.md`, hook output. The only exception is the GitHub API — `gh` queries that take `updated:>` filters need UTC and the catalog uses `date -u` there explicitly.
 - Routines commit on branches `routines/<routine_id>` and open PRs — never push to main.
 - Tests live in `tests/` (TDD: every check in `scripts/sanity-check.py` has a corresponding test). Run with `pytest -q`.
 - All scripts in `scripts/` and templates in `templates/` — read those instead of inlining.
