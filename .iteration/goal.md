@@ -62,6 +62,41 @@ broken installs, or routines that drift back to "analyze only."
 - [ ] Document the coordinator/dispatcher pattern in README and
       SKILL.md (new section: "How a fire flows").
 
+### Token frugality continued (PRD #8 — extract shared SKILL.md preamble)
+Tracking issue: https://github.com/paipeline/auto-routines/issues/8
+Each rendered per-routine `SKILL.md` is ~8.5KB today, ~5KB of which is reusable
+boilerplate (FSM, output format, self-evolve, automation_level, PR recipe).
+Extract into `.claude/skills/_shared/preamble.md`; per-routine SKILLs shrink to
+~2.5KB. Modules per the PRD (each is a candidate slice — implement in this
+order so each PR is independently shippable):
+
+- [ ] **Slice A — Shared preamble file.** Create `templates/routine-preamble.md`
+      with the FSM, output schema, automation_level dispatch, self-evolve JSON,
+      PR recipe, and failure modes (lifted verbatim from the current
+      `templates/routine-skill.md`). No renderer changes yet — just the new
+      template file plus content tests in `tests/test_preamble.py` covering:
+      sections present, no `{{placeholders}}`, verbatim local-time rule pinned.
+- [ ] **Slice B — Slim per-routine template.** Trim `templates/routine-skill.md`
+      to ~35 lines: keep frontmatter, Purpose, Trigger, Success criterion,
+      Inputs, prompt body, and a one-line `## Reference` pointer to
+      `.claude/skills/_shared/preamble.md`. Remove the boilerplate sections that
+      moved to the preamble. **Fix the double-bullet bug as part of this slice**
+      (drop the leading `- ` on the inputs line — see issue body).
+- [ ] **Slice C — Renderer update.** `scripts/render-routine-skills.py` writes
+      `.claude/skills/_shared/preamble.md` once (idempotent), then renders the
+      slimmer per-routine SKILLs. Add `tests/test_render.py` asserting the
+      preamble lands and per-routine SKILL.md size < 3KB. Re-render all six
+      installed SKILLs and commit the result.
+- [ ] **Slice D — Sanity-check byte budget.** Add a post-render rule to
+      `scripts/sanity-check.py`: per-routine rendered SKILL.md must be
+      <= `meta.max_routine_skill_bytes` (default 3000). Per-routine override
+      via `routines[i].max_skill_bytes`. Tests parametrized like the existing
+      budget-tier tests in `tests/test_sanity_check.py`.
+- [ ] **Slice E — Install flow + verification.** Update `SKILL.md` step 6 to
+      install the shared preamble and step 7 to verify it exists with no
+      placeholders. Add `.claude/skills/_shared/preamble.md` to the "Files this
+      skill manages" section.
+
 ### Token frugality (added iter-002 — user feedback: skill is consuming too many tokens)
 - [x] `/auto-routines status` MUST be a pure-script call with no Claude tokens.
       Added `scripts/status.py`; SKILL.md `Mode: status` now invokes it directly.
