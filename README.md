@@ -2,7 +2,18 @@
 
 > **Automation is the best harness.** A discipline you don't maintain is a discipline you don't have. Let your repo wear the harness for you.
 
-`auto-routines` is a [Claude Code](https://docs.claude.com/claude-code) skill. Point it at any repo, answer a 90-second interview, and it installs scheduled tasks, hooks, real `.git/hooks/post-commit` scripts, and PR-comment agents. A daily meta-routine reads your commits, PRs, CI runs, and its own logs — then adds, removes, and retunes routines to fit what your project needs *now*. Every change is a git commit. Revert any of them with one command.
+### Load. Interview. Leave. It evolves.
+
+```
+1.  cd into any repo
+2.  answer 4 questions  (90 seconds)
+3.  close the laptop
+4.  come back to a repo that has been maintaining itself
+```
+
+That's it. No config files, no cron syntax, no hand-picking automations. The agent picks them, installs them, watches them, and rewrites the set every day based on what your repo actually needs. You stay in the loop via a mermaid plan refreshed after every run, and every change is a git commit you can revert with one command.
+
+`auto-routines` is a [Claude Code](https://docs.claude.com/claude-code) skill that wires up scheduled tasks, hooks, real `.git/hooks/post-commit` scripts, and PR-comment agents — then keeps tuning them so they stay useful instead of rotting.
 
 ---
 
