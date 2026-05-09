@@ -179,23 +179,21 @@ After install, the consuming repo gets:
 
 ---
 
-## Validation
+## A use case
 
-The skill has been tested end-to-end against a temp repo:
+You're three weeks into a side project. You started with great habits — tests on every commit, a running changelog, a Sunday dependency audit. By week two, all of that has rotted. You're shipping straight to main, the README hasn't been touched since day one, and CI has been red for two days because you stopped looking.
 
-- ✅ `init` writes config, plan, history, hook entries, per-routine skill files
-- ✅ Real `git commit` triggers the post-commit hook (logged 6 fires across the test)
-- ✅ `evolve` reads signals from `log.jsonl`, decides changes, writes new config
-- ✅ Sanity check gates every apply (5/5 stages exit 0)
-- ✅ Each iter is its own git commit; `checkpoints.md` records SHAs
-- ✅ `revert iter-001` restores prior config + plan
-- ✅ Meta-routine prompt re-invokes the skill correctly with `cd <abs path>`
-- ✅ MCP `create_scheduled_task` round-trip (create → list → update)
+You run `/auto-routines` once. It interviews you for 90 seconds — what's the goal (ship v1.0 with real test coverage), what's the appetite (fully-auto). It installs:
 
-What still requires real-world runs to verify:
-- Whether the meta-routine fires at 09:00 each day (real cron tick)
-- Live `gh pr list` / `gh run list` integration
-- Anti-flap window enforcement across many iters
+- a **post-commit git hook** that nudges you when you commit code without touching tests
+- a **15-minute PR watcher** that comments on your own PRs the moment CI flips red, with the failing log excerpt
+- an **18:00 daily digest** that drops a summary of the day's commits + open PRs into `.iteration/digests/`
+- a **weekday 17:00 doc-drift fixer** that opens a PR when the README diverges from `src/api/`
+- a **daily 09:00 meta-routine** that re-reads everything and adapts the set
+
+By week four, the meta-routine has noticed the doc-drift fixer never finds drift (you stopped touching `src/api/`) and **neutralizes it**. CI flake rate has tripled, so it **retunes the PR watcher from 30m to 15m**. A new pattern emerges — you keep forgetting to bump the version on release commits — so it **adds a release-tag-checker** routine on its own. Each change is `iter-008`, `iter-009`, `iter-010` in your git log. You revert any of them with one command.
+
+You never had to maintain the discipline. The repo maintained it for you, and the plan was visible the whole time.
 
 ---
 
