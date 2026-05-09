@@ -1,0 +1,61 @@
+# .iteration/config.yaml
+# Schema for the active routine set. Managed by the auto-routines skill.
+# Edit by hand if you want; the next `evolve` run will respect manual edits
+# (and may overwrite them — record reasons in history/iter-NNN.md).
+
+schema_version: 2
+repo_slug: "example-repo"     # SET BY init from `basename "$(git rev-parse --show-toplevel)"` after normalization (see SKILL.md guardrail 9). Used in scheduled-task descriptions: [auto-routines:<repo_slug>] ...
+goal: "<one sentence — what this project is trying to be>"
+mode: goal-driven              # goal-driven | fully-auto
+created_at: "2026-05-09T00:00:00Z"
+last_iter: 1
+
+deps:
+  gh: required                 # required | optional | none
+  mcps:
+    - scheduled-tasks
+    # - linear
+    # - twitter
+
+# Routines registry. Each routine has a stable id (kebab-case, no double-hyphens).
+routines:
+  - id: pr-ci-watcher
+    enabled: true
+    primitive: scheduled         # scheduled | hook | loop | pr-poll | git-hook
+    trigger:
+      cron: "*/30 * * * *"       # for scheduled / pr-poll
+      # event: "Stop"            # for hook (PreToolUse | PostToolUse | Stop | UserPromptSubmit | etc.)
+      # tool_match: "Edit"       # optional, for PostToolUse
+    purpose: "Comment on open PRs when CI fails or passes; suggest fixes."
+    automation_level: auto       # off | notify | suggest | auto
+    prompt_skill: pr-ci-watcher  # the skill at .claude/skills/<this>/SKILL.md
+    iter_added: 1
+    task_id: ""                  # FILLED by `init`/`evolve` after MCP create returns the canonical taskId. Empty for non-scheduled routines.
+    last_outcome_summary: ""
+    stats:
+      runs: 0
+      useful: 0                  # incremented when output was accepted/used
+      noisy: 0                   # incremented when output was dismissed
+
+  - id: daily-digest
+    enabled: true
+    primitive: scheduled
+    trigger:
+      cron: "0 18 * * *"
+    purpose: "Summarize today's commits and PRs into .iteration/digests/."
+    automation_level: auto
+    prompt_skill: daily-digest
+    iter_added: 1
+    task_id: ""
+
+# Tasks neutralized because the scheduled-tasks MCP has no delete verb.
+# Tracked here so future iters don't treat them as orphans or recreate them.
+# Each entry: task_id, original_routine_id, neutralized_at_iter, neutralized_at (ISO), reason.
+neutralized_tasks: []
+
+# The meta-routine — the daily evolve. Installed by `init` and required.
+meta:
+  cron: "0 9 * * *"              # daily at 09:00 local
+  task_id: ""                    # FILLED after MCP create. Description is `[auto-routines:<repo_slug>] meta — daily evolve`.
+  last_run: null
+  anti_flap_window: 7            # iterations during which a removed routine cannot be re-added
