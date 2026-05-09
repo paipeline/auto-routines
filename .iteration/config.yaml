@@ -19,8 +19,8 @@ routines:
     enabled: true
     primitive: scheduled
     trigger:
-      cron: "0 */12 * * *"
-      human: "every 12 hours"
+      cron: "0 */2 * * *"
+      human: "every 2 hours (overnight burst — reset to every 12 hours when convenient)"
     purpose: "Central agent: read the brief and decide which routine(s) to dispatch this fire."
     success_criterion: "PRD complete + zero stagnant routines"
     stagnation_threshold: 7
