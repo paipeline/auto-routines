@@ -137,7 +137,19 @@ The eight steps below cluster into four phases:
    - **Mode**: pick `goal-driven` or `fully-auto`.
    - **MCPs**: multi-select from connected MCPs.
    - **Goal capture (goal-driven mode only)**: if mode is `goal-driven`, ask the user where the PRD/roadmap lives. If they don't have one yet, offer to write `.iteration/goal.md` from their goal sentence (single bullet list of 5–10 tasks). The `prd-implement` archetype reads this file every fire — without it the skill cannot drive feature work, only react to commits.
-   - **Candidate routines**: read `templates/routine-catalog.yaml`. Match each archetype's `stack_hints` against the analysis from step 3 and propose 4–8 candidates (the matched archetypes plus 1–2 obvious gap-fillers). Show the user the archetype `id` + `purpose` and let them multi-select which to install. **In `goal-driven` mode you MUST always include `prd-implement` in the candidate list, regardless of stack hints — that archetype is the one that pushes the PRD forward on a schedule. Without it the install is just reactive maintenance.**
+   - **Budget**: ask "What's your token budget for this repo?" with these options. Store as `meta.budget`. The budget pre-fills the per-routine frequency in the next step — the user can still override per-routine.
+     ```
+     [low]      ~5 Claude sessions/week — prd-implement weekdays 9 AM, meta weekly,
+                drop daily-digest and session-doc-drift
+     [medium]   ~15 sessions/week — prd-implement every 12h, meta daily,
+                digest daily (script-only fallback if available),
+                session-doc-drift weekly
+     [high]     ~50 sessions/week — current "every 4h" cadence on prd-implement,
+                meta daily, digest daily, drift weekday evenings
+     [custom]   ask each routine individually (current default flow)
+     ```
+     The `low/medium/high → cadence` mapping is in "Budget → cadence presets" below. Apply it as the default frequency for every routine the user selects in the next step.
+   - **Candidate routines**: read `templates/routine-catalog.yaml`. Match each archetype's `stack_hints` against the analysis from step 3 and propose 4–8 candidates (the matched archetypes plus 1–2 obvious gap-fillers). Show the user the archetype `id` + `purpose` and let them multi-select which to install. **In `goal-driven` mode you MUST always include `prd-implement` in the candidate list, regardless of stack hints — that archetype is the one that pushes the PRD forward on a schedule. Without it the install is just reactive maintenance.** When `meta.budget` is `low`, automatically deselect `daily-digest` and `session-doc-drift` from the candidate list (they bring marginal value at low budget) — but still show them so the user can re-add manually.
    - **For each selected candidate, ask three questions in order:**
      1. **Frequency** (multi-choice — never show cron in the UI):
         ```
@@ -319,7 +331,17 @@ The flag `routine.self_evolve` (default true) gates (a) and (b). Set false for r
 
 ## Mode: `status`
 
-Print the text status block. No mermaid. No mode-specific work beyond reading state.
+**This mode does not spawn an LLM.** Run the local script and print its output verbatim:
+
+```bash
+python3 scripts/status.py            # full table
+python3 scripts/status.py --routine <id>   # one-routine drill-in
+python3 scripts/status.py --json     # machine-readable
+```
+
+The script reads `.iteration/config.yaml` + `.iteration/log.jsonl` + `.iteration/evolve_requests.jsonl` and renders the same status block format documented under "Status display". No file analysis, no synthesis, no Claude tokens.
+
+Install copies `scripts/status.py` from the skill directory into the consumer repo (step 6a). Tests in `tests/test_status.py` pin the no-LLM contract: any change that introduces `subprocess`, network calls, or LLM invocation breaks the test suite.
 
 ## Mode: `stop <routine_id>`
 
@@ -375,6 +397,43 @@ When the user picks a frequency in the interview, store both fields:
 | weekdays only — 5:00 PM          | `0 17 * * 1-5`         | `5:00 PM weekdays`           |
 | on every git commit              | (none)                 | `on every git commit`        |
 | custom                           | (parse user input)     | (echo back the user's phrase)|
+
+## Budget → cadence presets
+
+`meta.budget` controls how often LLM-spawning routines fire. Set during the
+interview (step 4), overridable per-routine. Tokens scale roughly linearly with
+"Claude sessions per week", so this is the single biggest knob the user has.
+
+| Routine             | low                     | medium (default)        | high                    |
+| ------------------- | ----------------------- | ----------------------- | ----------------------- |
+| `prd-implement`     | weekdays 9 AM           | every 12h               | every 4h                |
+| `meta` (evolve)     | weekly Mon 9 AM         | daily 9 AM              | daily 9 AM              |
+| `daily-digest`      | (skipped)               | daily 6 PM              | daily 6 PM              |
+| `session-doc-drift` | (skipped)               | weekly Mon 5 PM         | weekday 5 PM            |
+| `commit-tests`      | on commit (pure shell)  | on commit (pure shell)  | on commit (pure shell)  |
+| `commit-lint`       | on commit (pure shell)  | on commit (pure shell)  | on commit (pure shell)  |
+
+Cron strings for each preset:
+
+| budget × routine               | cron              | human                  |
+| ------------------------------ | ----------------- | ---------------------- |
+| `low / prd-implement`          | `0 9 * * 1-5`     | weekdays 9:00 AM       |
+| `low / meta`                   | `0 9 * * 1`       | Mondays 9:00 AM        |
+| `medium / prd-implement`       | `0 */12 * * *`    | every 12 hours         |
+| `medium / meta`                | `0 9 * * *`       | 9:00 AM daily          |
+| `medium / daily-digest`        | `0 18 * * *`      | 6:00 PM daily          |
+| `medium / session-doc-drift`   | `0 17 * * 1`      | Mondays 5:00 PM        |
+| `high / prd-implement`         | `0 */4 * * *`     | every 4 hours          |
+| `high / session-doc-drift`     | `0 17 * * 1-5`    | 5:00 PM weekdays       |
+
+Token-frugal principles applied at every budget tier:
+- **Status is never an LLM call.** `Mode: status` runs `scripts/status.py`.
+- **Post-commit hooks are pure shell.** `commit-tests` and `commit-lint` never
+  spawn Claude — they run `pytest`/`ruff` and log outcomes.
+- **`daily-digest` MAY be downgraded to a pure-shell variant.** The catalog
+  ships an LLM version, but for `low`/`medium` the install can swap it for a
+  `git log` + `gh pr list` shell summary written into
+  `.iteration/digests/`. (TODO: see `.iteration/goal.md`.)
 
 ## Status display (the only output format)
 

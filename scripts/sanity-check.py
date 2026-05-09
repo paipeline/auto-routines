@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import sys
 from pathlib import Path
@@ -48,6 +47,7 @@ PRIMITIVES = {"hook", "scheduled", "loop", "pr-poll", "git-hook"}
 LEVELS = {"off", "notify", "suggest", "auto"}
 MODES = {"goal-driven", "fully-auto"}
 GH_VALUES = {"required", "optional", "none"}
+BUDGET_TIERS = {"low", "medium", "high", "custom"}
 HOOK_EVENTS = {
     "PreToolUse", "PostToolUse", "Notification", "Stop", "SubagentStop",
     "UserPromptSubmit", "PreCompact", "SessionStart", "SessionEnd",
@@ -263,6 +263,12 @@ def check(config: dict) -> list[str]:
             errors.append("meta.default_stagnation_threshold must be a positive integer")
     if "process_evolve_requests" in meta and not isinstance(meta["process_evolve_requests"], bool):
         errors.append("meta.process_evolve_requests must be a bool")
+    if "budget" in meta and meta["budget"] not in BUDGET_TIERS:
+        errors.append(
+            f"meta.budget must be one of {sorted(BUDGET_TIERS)}, got {meta['budget']!r}. "
+            f"This controls how often LLM-spawning routines fire — see SKILL.md "
+            f"\"Budget → cadence presets\"."
+        )
     if config.get("schema_version", 0) >= 3 and "human" not in meta:
         errors.append(
             "meta.human is required (schema 3+). e.g. '9:00 AM daily' to pair with meta.cron."

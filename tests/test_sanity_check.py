@@ -7,7 +7,6 @@ Every guardrail in SKILL.md should fail-loud here when violated. Add a test
 from __future__ import annotations
 
 import copy
-from pathlib import Path
 
 import pytest
 import yaml
@@ -422,3 +421,31 @@ def test_state_set_constants_exposed():
     assert sanity.FIRING_STATES == {"ACTIVE", "EVOLVING"}
     assert sanity.PAUSED_STATES == {"STAGNANT", "COMPLETED"}
     assert sanity.TERMINAL_STATES == {"STOPPED"}
+
+
+# ---------------------------------------------------------------------------
+# meta.budget — controls the cadence presets in SKILL.md
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("tier", ["low", "medium", "high", "custom"])
+def test_meta_budget_accepts_known_tiers(schema3_config, tier):
+    schema3_config["meta"]["budget"] = tier
+    assert sanity.check(schema3_config) == []
+
+
+@pytest.mark.parametrize("bad", ["medium-high", "free", "", 5, None, True])
+def test_meta_budget_rejects_unknown_values(schema3_config, bad):
+    schema3_config["meta"]["budget"] = bad
+    errors = sanity.check(schema3_config)
+    assert any("meta.budget" in e for e in errors), errors
+
+
+def test_meta_budget_optional(schema3_config):
+    """Configs without meta.budget still validate — keeps schema-2 configs working."""
+    schema3_config["meta"].pop("budget", None)
+    assert sanity.check(schema3_config) == []
+
+
+def test_meta_budget_constants_exposed():
+    """SKILL.md and status.py reference these tiers — pin them."""
+    assert sanity.BUDGET_TIERS == {"low", "medium", "high", "custom"}
