@@ -18,7 +18,7 @@
 5.  come back to a repo that has been developing and maintaining itself
 ```
 
-`auto-routines` autoconfigures the harness — routines, hooks, scheduled tasks, real `.git/hooks/post-commit` scripts, PR-comment agents — and from there it runs and evolves *itself*. Pick one of two modes:
+`auto-routines` is **not a planner** — it actually installs the harness on disk: writes `.git/hooks/post-commit` shell scripts, creates scheduled tasks via the `scheduled-tasks` MCP, generates per-routine `SKILL.md` files under `.claude/skills/`, and registers Stop hooks in `.claude/settings.json`. After install it verifies every artifact landed; if anything is missing it aborts with a written failure report. From there it runs and evolves *itself*. Each routine **writes code on a `routines/<id>` branch and opens a PR** — none of them just print findings. Pick one of two modes:
 
 - **`fully-auto`** — the meta-agent picks direction from signals alone (CI flake rate, PR queue depth, doc drift, commit cadence). The repo keeps itself healthy.
 - **`goal-driven`** — you set an iteration goal. The meta-agent picks routines that close the gap to it.
@@ -31,6 +31,7 @@ Every change the meta-agent makes is a git commit. Revert any of them with one c
 
 | | **Before auto-routines** | **After auto-routines** |
 |---|---|---|
+| **Who pushes the PRD forward** | **You, when you have time** | **A 4-hour routine that reads `.iteration/goal.md`, picks the next slice, writes code + tests, opens a PR** |
 | Who runs the tests | You, when you remember | A post-commit routine, every commit |
 | Who reads the CI log | You, after a Slack ping | A 15-min watcher, comments the failing line on the PR |
 | Who writes the daily digest | Nobody — you "will later" | An 18:00 routine, drops it in `.iteration/digests/` |
@@ -133,7 +134,7 @@ PRs and issues are welcome. The project is developed **test-first** — every gu
 
 ```bash
 pip install pyyaml pytest
-pytest -q          # 56 tests, ~70ms
+pytest -q          # 100 tests, ~80ms
 ```
 
 Good first issues are tagged [`good first issue`](https://github.com/paipeline/auto-routines/issues?q=is%3Aopen+is%3Aissue+label%3A%22good+first+issue%22). Routine proposals go through the [feature-request template](.github/ISSUE_TEMPLATE/feature_request.yml).
