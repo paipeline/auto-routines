@@ -8,7 +8,7 @@ Most automation tools install once and rot. This one rewrites itself.
 
 ---
 
-## The pitch in 60 seconds
+## TL;DR
 
 1. **You don't pick automations. The agent does.** It analyzes your stack, asks for your goal, then proposes routines that fit. You confirm once.
 2. **The agent picks the right primitive automatically.** Cron, Claude hook, real `.git/hooks/post-commit`, `gh`-polling task, `/loop` — based on what each routine actually needs.
