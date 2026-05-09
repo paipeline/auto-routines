@@ -7,6 +7,8 @@ description: Analyze a repository, interview the user about goal, automation app
 
 You are operating the `auto-routines` skill. The user wants their repository to run a self-evolving set of automations. Interview them once with explicit per-routine frequency choices, install routines as a finite-state machine, and from then on the daily `evolve` mode plus mid-run evolve requests adapt the set autonomously while always showing a plain-text status block (am/pm times, no mermaid) and gating risky changes behind a sanity check.
 
+**This skill is not a planner. It installs and writes code.** When `init` runs, it must produce real artifacts on disk: a `.git/hooks/post-commit` shell script, entries in `.claude/settings.json`, scheduled-task IDs returned from the MCP, per-routine SKILL.md files filled with concrete prompts (sourced from `templates/routine-catalog.yaml`). Routines themselves, when fired, must produce real diffs — they branch on `routines/<id>`, commit, push, open PRs. Never stop at "here's the plan, looks good?" — that's the failure mode this skill exists to fix.
+
 ## Modes
 
 Detect mode from the user's invocation:
@@ -69,15 +71,24 @@ STOPPED    → ACTIVE       only via explicit `/auto-routines start <id>` (reset
 
 ## Mode: `init`
 
-1. **Preflight** — verify git work tree; check `gh auth status`; list connected MCPs.
+> **Install is mandatory.** This skill does not stop at planning. Every numbered
+> step below MUST run to completion before printing the final status block. If
+> any step fails, halt with a clear error — do NOT skip ahead to "looks good!"
+> or hand the user a plan and stop. Step 7 ("Verify") aborts if any artifact
+> is missing on disk or in the MCP listing.
+
+1. **Preflight** — verify `git rev-parse --is-inside-work-tree`; check `gh auth status`; list connected MCPs.
+
 2. **Compute identity** — `repo_slug` per Guardrail 9.
-3. **Analyze** — detect stack (`package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, …); detect tests/CI; read `git log --oneline -50`; `gh pr list --state all --limit 20`; read `README*`.
+
+3. **Analyze** — detect stack (`package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `Gemfile`, …); detect tests/CI; read `git log --oneline -50`; `gh pr list --state all --limit 20` if available; read `README*`.
+
 4. **Interview** (use `AskUserQuestion` for every step):
    - **Goal**: "What's the goal of this project (one sentence)?"
    - **Mode**: pick `goal-driven` or `fully-auto`.
    - **MCPs**: multi-select from connected MCPs.
-   - **Candidate routines**: based on analysis, propose 4–8 candidates.
-   - **For each enabled candidate, ask three questions in order:**
+   - **Candidate routines**: read `templates/routine-catalog.yaml`. Match each archetype's `stack_hints` against the analysis from step 3 and propose 4–8 candidates (the matched archetypes plus 1–2 obvious gap-fillers). Show the user the archetype `id` + `purpose` and let them multi-select which to install.
+   - **For each selected candidate, ask three questions in order:**
      1. **Frequency** (multi-choice — never show cron in the UI):
         ```
         [1] every 15 minutes
@@ -90,20 +101,109 @@ STOPPED    → ACTIVE       only via explicit `/auto-routines start <id>` (reset
         [8] custom — type your own       (free text, you parse)
         [skip] don't install this routine
         ```
-        Internally store `trigger.cron` (canonical) AND `trigger.human` (the chosen label).
-     2. **Success criterion** (free text, optional): "How will we know this routine has done its job? (leave blank if it should run indefinitely)" — stored as `routine.success_criterion`. Used by meta to transition ACTIVE → COMPLETED.
-     3. **Self-evolve allowed?** (yes/no, default yes): "May this routine fire `/auto-routines evolve` mid-run if it notices its own config is wrong?" — stored as `routine.self_evolve`.
-5. **Render & confirm** — stage `config.yaml`, sanity-check, render the text status block per the "Status display" section, ask user to confirm.
-6. **Install** (only after confirm):
-   - Move staged config into `.iteration/config.yaml`. Create `.iteration/log.jsonl`, `.iteration/checkpoints.md`, `.iteration/evolve_requests.jsonl` (empty), `.iteration/plan.txt`, `.iteration/history/iter-001-init.md`.
-   - Pre-flight ownership check (Guardrail 7).
-   - For each routine: install per "Wiring routines"; capture `task_id`; transition `state: PROPOSED → ACTIVE`.
-   - Install the `Stop` hook that drains `.iteration/evolve_requests.jsonl` (see "Mid-run self-evolution").
-   - For every `git-hook`: append hook output paths to `.gitignore`.
-   - Schedule the meta-routine: `auto-routines-<repo_slug>-meta`, description `[auto-routines:<repo_slug>] meta — daily evolve`, prompt `cd <abs repo path> && /auto-routines evolve`. The `cd` is required.
-   - Two-step commit: `git add .iteration .claude && git commit -m "iter-001: install auto-routines"` → record SHA in `checkpoints.md` → `git commit --amend --no-edit`.
-   - Print the final status block.
-   - Delete `/tmp/auto-routines-staging-<repo_slug>/`.
+        Default to the archetype's `trigger_default`. Store `trigger.cron` (canonical) AND `trigger.human`.
+     2. **Success criterion** (free text, optional). Default to the archetype's `success_criterion`.
+     3. **Self-evolve allowed?** (yes/no). Default to the archetype's `self_evolve` flag.
+
+5. **Render & confirm** — stage `config.yaml` at `/tmp/auto-routines-staging-<repo_slug>/config.yaml`. Run `python3 scripts/sanity-check.py /tmp/auto-routines-staging-<repo_slug>/config.yaml`. Render the text status block per "Status display". Ask the user to confirm via `AskUserQuestion`. Do NOT proceed to step 6 without explicit confirmation.
+
+6. **Install** — perform every sub-step in order. Each sub-step is mandatory. Write the artifacts described, do not just describe them.
+
+   **6a. Create `.iteration/` skeleton** (relative to repo root):
+   ```
+   .iteration/config.yaml             # move from staging
+   .iteration/log.jsonl               # touch (empty)
+   .iteration/evolve_requests.jsonl   # touch (empty)
+   .iteration/checkpoints.md          # write header "# auto-routines checkpoints\n"
+   .iteration/plan.txt                # rendered status block
+   .iteration/history/iter-001-init.md
+   ```
+
+   **6b. Pre-flight ownership check** (Guardrail 7) — list scheduled tasks, filter to `[auto-routines:<repo_slug>]`. If any leftover, ask via `AskUserQuestion` whether to reuse / neutralize / abort.
+
+   **6c. Per-routine install** — for each routine in `config.yaml > routines[]`, dispatch on `routine.primitive`:
+
+   - **`primitive: scheduled` or `primitive: pr-poll`:**
+     1. Read `templates/routine-skill.md`. Fill all `{{placeholders}}` (see "Placeholder semantics"). Use the archetype's `prompt_body` from the catalog as `{{routine_prompt_body}}` unless the user typed a custom prompt.
+     2. Write the filled file to `.claude/skills/<routine_id>/SKILL.md`.
+     3. Call `mcp__scheduled-tasks__create_scheduled_task` with:
+        ```
+        taskId: "auto-routines-<repo_slug>-<routine_id>"
+        cronExpression: "<routine.trigger.cron>"
+        prompt: "cd <abs repo root> && /<routine_id>"
+        description: "[auto-routines:<repo_slug>] <routine.purpose>"
+        enabled: true
+        ```
+     4. Capture the returned `taskId` and write it back to `config.yaml > routines[<i>].task_id`.
+     5. Transition `state: PROPOSED → ACTIVE` in config.yaml.
+
+   - **`primitive: hook`** (Claude Code hook event like `Stop`, `PostToolUse`, `UserPromptSubmit`):
+     1. Render the per-routine SKILL.md as above.
+     2. Read `.claude/settings.json` (create with `{}` if missing). Merge — never overwrite — the new hook entry under `hooks.<EventName>[]`. Each entry is:
+        ```json
+        {
+          "matcher": "<tool-pattern or empty>",
+          "hooks": [{"type": "command", "command": "claude --dangerously-skip-permissions -p '/<routine_id>'"}]
+        }
+        ```
+     3. Write back. Validate the JSON parses before saving.
+     4. Transition `state: PROPOSED → ACTIVE`.
+
+   - **`primitive: git-hook`** (real git on-commit):
+     1. Render the per-routine SKILL.md as above.
+     2. Read `templates/post-commit-hook.sh`. For each git-hook routine, append to the dispatch block:
+        ```bash
+        ( claude --dangerously-skip-permissions -p "/<routine_id>" \
+            >> "$HOOK_LOG" 2>&1 \
+            && echo "{\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"routine\":\"<routine_id>\",\"outcome\":\"ok\"}" >> "$LOG" \
+          ) &
+        ```
+     3. Write the assembled file to `.git/hooks/post-commit`. `chmod +x .git/hooks/post-commit`.
+     4. Append `.iteration/hook-output.log` to `.gitignore` (and any other path the script writes). Required for revert (Guardrail 4 of Mode `revert`).
+     5. Transition `state: PROPOSED → ACTIVE`.
+
+   - **`primitive: loop`:**
+     1. Render the per-routine SKILL.md. The launcher SKILL describes how the user starts the loop (`/<routine_id>` with `/loop` flag).
+     2. Loops are user-initiated; no scheduled task. Transition `state: PROPOSED → ACTIVE`.
+
+   **6d. Install the always-on `Stop` hook for evolve-request draining.** This is independent of any user-selected routine. Add to `.claude/settings.json > hooks.Stop[]`:
+   ```json
+   {
+     "matcher": "",
+     "hooks": [{"type": "command", "command": "test -s .iteration/evolve_requests.jsonl && claude --dangerously-skip-permissions -p '/auto-routines evolve' || true"}]
+   }
+   ```
+
+   **6e. Schedule the meta-routine:**
+   ```
+   taskId:         "auto-routines-<repo_slug>-meta"
+   cronExpression: "<config.meta.cron>"          # default 0 9 * * *
+   prompt:         "cd <abs repo root> && /auto-routines evolve"
+   description:    "[auto-routines:<repo_slug>] meta — daily evolve"
+   enabled:        true
+   ```
+   Capture `task_id` to `config.yaml > meta.task_id`.
+
+   **6f. Two-step commit (preserves `checkpoints.md` inside the iter commit):**
+   1. `git add .iteration .claude .gitignore .git/hooks/post-commit 2>/dev/null; git commit -m "iter-001: install auto-routines"`
+   2. `SHA=$(git rev-parse HEAD); printf 'iter-001: %s  %s\n' "$SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> .iteration/checkpoints.md; git add .iteration/checkpoints.md && git commit --amend --no-edit`
+
+7. **Verify install** — this step is what catches "I rendered a plan but installed nothing". For every routine in `config.yaml`:
+   - `state: ACTIVE` in config.yaml
+   - `.claude/skills/<routine_id>/SKILL.md` exists, has no unfilled `{{placeholders}}`
+   - If `primitive: scheduled`: the `task_id` in config matches a real entry in `mcp__scheduled-tasks__list_scheduled_tasks` whose description starts with `[auto-routines:<repo_slug>]`
+   - If `primitive: hook`: an entry exists in `.claude/settings.json > hooks.<event>[]` with command containing `/<routine_id>`
+   - If `primitive: git-hook`: `.git/hooks/post-commit` is executable AND contains `/<routine_id>`
+   - The meta task exists in the MCP listing
+   - The always-on `Stop` evolve-drain hook exists in `.claude/settings.json`
+
+   If ANY check fails, write `.iteration/install-failed.md` with the missing artifacts and abort with a non-zero exit. Do not print "install successful" if anything is missing.
+
+8. **Print** the final status block, plus a one-line summary like:
+   ```
+   installed: 4 routines (3 active, 1 git-hook), meta scheduled 9:00 AM daily
+   ```
+   Then delete `/tmp/auto-routines-staging-<repo_slug>/`.
 
 ## Mode: `evolve`
 
@@ -125,14 +225,16 @@ Fully auto. Every change is checkpointed and sanity-checked.
    - **goal-driven**: re-read iteration goal, propose routines that close the gap. If goal is met, write `.iteration/next-goal.md` and continue with current routines.
    - **fully-auto**: signals-driven (CI flake, PR queue depth, doc drift, commit cadence).
    - **Mid-run targets**: routines currently in EVOLVING state — apply the suggested action from the request (retune, stop, expand) and transition out of EVOLVING (→ ACTIVE or → STOPPED).
+   - **When proposing a NEW routine**: pick from `templates/routine-catalog.yaml` first — its archetypes have battle-tested prompt bodies that produce real diffs. Only invent a custom routine if no archetype fits.
    - Anti-flap: skip any routine id removed within last `meta.anti_flap_window` iters.
 6. **Sanity check** the proposed new config (write to `/tmp/...`, run `scripts/sanity-check.py`). On failure, write `.iteration/sanity-failed-NNN.md`, halt.
 7. **Checkpoint** (two-step amend pattern as in `init`).
-8. **Apply** diff-based:
-   - **Add**: install per "Wiring routines"; capture `task_id`; `state: PROPOSED → ACTIVE`.
+8. **Apply** diff-based — execute every change concretely; never just describe:
+   - **Add**: run the full per-primitive install procedure from `init` step 6c (write the per-routine SKILL.md from the catalog, create the scheduled task / hook entry / git-hook block). Capture `task_id`. `state: PROPOSED → ACTIVE`.
    - **Edit / Retune**: `update_scheduled_task` (reuse stored `task_id`); rewrite the per-routine SKILL.md if its prompt changed; update `trigger.human`.
    - **Remove**: neutralize per Guardrail 8; `state: → STOPPED`.
    - **Final reconciliation**: orphan sweep (Guardrail 7).
+   - **Run the same `init` step 7 verification on changed routines.** Abort the iter (and revert via the just-recorded checkpoint) if any post-apply check fails.
 9. **Render** new `.iteration/plan.txt` per "Status display".
 10. **Log** to `.iteration/history/iter-NNN.md` (must include the `triggered_by` value if invoked with `--triggered-by`) and `.iteration/log.jsonl`.
 11. **Print** the status block + a one-paragraph summary of what changed and why.
@@ -253,6 +355,19 @@ Notes column lifts from: most recent `iter-NNN.md` action involving this routine
 | `{{self_evolve_block}}`    | If `routine.self_evolve: true`, include the snippet that appends to `evolve_requests.jsonl` when the routine concludes its config is wrong. Otherwise omit. |
 | `{{routine_specific_inputs}}` | Bullet list. PR routines get `gh pr list --state open --limit 20`; CI routines get `gh run list --limit 10`; commit routines get `git log --since="<last-fire>"`. |
 | `{{routine_prompt_body}}`  | Generated from interview answer + standard footer "log outcome to `.iteration/log.jsonl`".        |
+
+## The routine catalog
+
+`templates/routine-catalog.yaml` is the source of pre-built archetypes. Each archetype has:
+
+- `id`, `purpose`, `primitive`, `trigger_default`, `automation_default`, `self_evolve`
+- `success_criterion` template
+- `stack_hints` — list of detection signals (file names, package managers, frameworks)
+- `prompt_body` — concrete instructions that tell the routine to write code, commit on `routines/<id>`, and open a PR
+
+When proposing routines (in `init` interview or `evolve` decisions), prefer archetypes whose `stack_hints` match what step 3 ("Analyze") detected. Only invent a custom routine when no archetype fits.
+
+The catalog is treated as authoritative for `routine_prompt_body` unless the user types a custom prompt during the interview. This is what makes the skill "actually do work" rather than "render a plan."
 
 ## Files this skill manages
 

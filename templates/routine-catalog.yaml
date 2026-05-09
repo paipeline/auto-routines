@@ -1,0 +1,255 @@
+# templates/routine-catalog.yaml
+#
+# Archetype catalog for auto-routines. The skill picks archetypes during the
+# interview based on detected stack and user goals, and uses these as the
+# starting point for routine_prompt_body — concrete instructions that tell
+# the routine to *write code, commit, and open PRs*, not just print findings.
+#
+# Each archetype contains:
+#   id:                  default routine id (kebab-case)
+#   purpose:             one-line summary
+#   primitive:           hook | scheduled | git-hook | pr-poll | loop
+#   trigger_default:     human-readable schedule (mapped to cron at install)
+#   automation_default:  off | notify | suggest | auto
+#   self_evolve:         true|false — whether this archetype should fire mid-run evolve
+#   success_criterion:   template (with {{placeholders}} the interview may fill)
+#   stack_hints:         list of detection signals that suggest this routine
+#   prompt_body: |       the instructions Claude follows when the routine fires.
+#                        These MUST tell the routine to actually do work
+#                        (write code, run commands, commit, open PRs) —
+#                        not just analyze.
+#
+# IMPORTANT: every prompt_body ends by telling the routine to commit on
+# `routines/<id>` and open a PR if `automation_level: auto`. Never push to main.
+
+archetypes:
+
+  - id: commit-tests
+    purpose: "Run the test suite after every commit; if anything fails, open a fix PR."
+    primitive: git-hook
+    trigger_default: "on every git commit"
+    automation_default: auto
+    self_evolve: false
+    success_criterion: "all tests green for 50 consecutive commits"
+    stack_hints: [pytest, jest, mocha, go-test, cargo-test, rspec]
+    prompt_body: |
+      The user just committed. Your job:
+
+      1. Detect the test runner from the repo (package.json scripts.test,
+         pyproject.toml [tool.pytest], Cargo.toml, go.mod, Gemfile, etc.).
+      2. Run it with a 5-minute timeout. Capture stdout+stderr.
+      3. If exit code is 0: log `outcome: ok, increment_signal: false` and exit.
+      4. If exit code is non-zero:
+         a. Read the failing test output and the diff of the just-committed change
+            (`git show HEAD --stat` and `git show HEAD -- <changed files>`).
+         b. Identify the root cause. If it's a clear regression in the committed
+            change, write the minimum fix. If it's a flaky test, add `@pytest.mark.flaky`
+            (or framework equivalent) only when you can show 3-of-5 runs pass.
+         c. Create branch `routines/commit-tests`, commit your fix with message
+            `fix(tests): <one-line summary>` referencing the original commit SHA.
+         d. Open a PR with `gh pr create --base <default branch> --head routines/commit-tests
+            --title 'fix(tests): <summary>' --body '<failing test output, root cause,
+            link to triggering commit>'`.
+         e. Log `outcome: ok, increment_signal: true, summary: <PR url>`.
+      5. Never push to main. Never amend the user's commit.
+
+  - id: commit-lint
+    purpose: "Run linter+formatter after every commit; auto-fix and PR when violations exist."
+    primitive: git-hook
+    trigger_default: "on every git commit"
+    automation_default: auto
+    self_evolve: false
+    success_criterion: "0 lint violations in last 20 commits"
+    stack_hints: [ruff, eslint, mypy, prettier, rubocop, gofmt, clippy]
+    prompt_body: |
+      The user just committed. Your job:
+
+      1. Detect available linters/formatters (ruff, eslint, mypy, prettier, gofmt,
+         clippy, rubocop). Skip any not present.
+      2. Run each in --fix mode (or formatter equivalent). If anything changed:
+         a. Verify the changes are pure formatting/style — no semantic edits.
+            If the linter wants a behavior change (e.g. ruff's `B008`), DO NOT
+            apply it; only flag.
+         b. Branch: `routines/commit-lint`. Commit with message
+            `style: auto-fix lint violations from <short SHA>`.
+         c. Open PR via `gh pr create`. Body lists which tools fired and which
+            files changed.
+         d. Log `outcome: ok, increment_signal: true, summary: <PR url>`.
+      3. Run remaining linters in check-only mode for issues that can't be
+         auto-fixed. If any errors remain, open a separate PR with TODO comments
+         placed at violation sites and a checklist.
+      4. If everything was already clean, log `outcome: ok, increment_signal: false`.
+
+  - id: session-test-gap
+    purpose: "After each Claude session, find untested new code and write the tests."
+    primitive: hook
+    trigger_default: "Stop hook (end of every Claude session)"
+    automation_default: auto
+    self_evolve: true
+    success_criterion: "test coverage of files touched this session ≥ 80%"
+    stack_hints: [pytest, jest, mocha, go-test]
+    prompt_body: |
+      The Claude session just ended. Your job:
+
+      1. List files touched in the session (`git diff --name-only <session-start-sha>..HEAD`
+         where session-start-sha is recorded in .iteration/session.json — if missing,
+         use the last 10 commits).
+      2. For each touched source file, look up its corresponding test file. If a
+         file has no test file, OR has uncovered functions (use coverage tooling
+         when available — `pytest --cov`, `jest --coverage`), proceed.
+      3. For each gap:
+         a. Read the source. Pick the 1-3 most behavior-critical functions
+            (those with branches, side effects, or external I/O).
+         b. Write tests that exercise the happy path + at least one failure path.
+            Match the project's existing test style (read 3 existing test files
+            first to learn the conventions).
+         c. Run the new tests; iterate until green.
+      4. If you wrote any tests:
+         a. Branch: `routines/session-test-gap`. Commit with message
+            `test: cover untested functions in <files>`.
+         b. PR body: list each function tested, the coverage delta, why each
+            test matters.
+         c. Log `outcome: ok, increment_signal: true, summary: <PR url>`.
+      5. If no gaps found, log `outcome: ok, increment_signal: false`.
+      6. Hard cap: 30 minutes total. If you hit the cap, commit what you have
+         with a TODO list in the PR body for the rest.
+
+  - id: session-doc-drift
+    purpose: "After each Claude session, update README/docs that diverge from the code."
+    primitive: hook
+    trigger_default: "Stop hook (end of every Claude session)"
+    automation_default: auto
+    self_evolve: true
+    success_criterion: "README in sync with code for 7 consecutive sessions"
+    stack_hints: [readme, mkdocs, sphinx]
+    prompt_body: |
+      The Claude session just ended. Your job:
+
+      1. Identify "documented surface" files: README.md, docs/**, plus any
+         file in `.iteration/config.yaml > docs.tracked_paths` if present.
+      2. Identify "documented things":
+         - CLI commands shown in README → check they exist and produce the
+           shown output (run them with --help, diff against the README).
+         - API endpoints / function signatures → grep code for the signature,
+           confirm it matches.
+         - Install steps → verify each command is still in package.json /
+           pyproject.toml / Makefile.
+      3. For each drift:
+         a. Update the doc to match code. Never update code to match docs
+            (that's the user's job — flag those instead).
+         b. If the README references a feature that was deleted, remove the
+            reference and note it in the PR body.
+      4. If you changed any doc:
+         a. Branch: `routines/session-doc-drift`. Commit with message
+            `docs: sync README with code (<short summary>)`.
+         b. PR body: bullet list of each drift fixed, with file:line refs.
+         c. Log `outcome: ok, increment_signal: true, summary: <PR url>`.
+      5. If no drift, log `outcome: ok, increment_signal: false`.
+
+  - id: pr-ci-watcher
+    purpose: "Comment on open PRs when CI flips red, with the failing line and a fix proposal."
+    primitive: scheduled
+    trigger_default: "every 30 minutes"
+    automation_default: auto
+    self_evolve: true
+    success_criterion: "CI green on last 50 PRs"
+    stack_hints: [github-actions, gitlab-ci, circleci]
+    prompt_body: |
+      Your job: keep PR authors informed about CI failures, fast.
+
+      1. List open PRs: `gh pr list --state open --limit 30 --json number,title,statusCheckRollup,headRefName`.
+      2. For each PR with a failing check that this routine has not commented
+         on yet (track via .iteration/pr-watch-state.json):
+         a. Fetch the failing check's logs: `gh run view <run-id> --log-failed`.
+         b. Identify the failing test or build step. Extract the smallest
+            relevant excerpt (≤ 30 lines).
+         c. Read the PR diff for the file the failure points at.
+         d. If the cause is obvious in the diff: post a PR comment with the
+            log excerpt, the line in the diff, and a one-line fix suggestion.
+         e. If the failure looks like a flake: do not comment yet. Re-check
+            on the next fire — if still failing, then comment.
+      3. If a PR has gone green after a previous failure comment from this
+         routine, post a one-line "✓ CI green now" reply.
+      4. Update `.iteration/pr-watch-state.json` with PR numbers + last
+         commented-on check id, so we don't double-comment.
+      5. Log per-PR outcomes to `.iteration/log.jsonl`. `increment_signal: true`
+         if you posted any comment.
+
+  - id: daily-digest
+    purpose: "Summarize today's commits and PRs into .iteration/digests/."
+    primitive: scheduled
+    trigger_default: "6:00 PM daily"
+    automation_default: auto
+    self_evolve: false
+    success_criterion: ""
+    stack_hints: []
+    prompt_body: |
+      Write a one-page digest of today's repo activity.
+
+      1. Gather:
+         - `git log --since="00:00 today" --pretty=format:"%h %s (%an)"`
+         - `gh pr list --state all --search "updated:>$(date -u -v-1d +%Y-%m-%dT%H:%M:%SZ)"`
+         - Tail of `.iteration/log.jsonl` since 00:00.
+      2. Write `.iteration/digests/<YYYY-MM-DD>.md` with sections:
+         ## Commits   — bullet list with one-line context
+         ## PRs       — opened, merged, still-open-failing
+         ## Routines  — what fired, what was useful, what was noisy
+         ## Tomorrow  — top 3 things blocking progress (your judgment)
+      3. Commit the digest on branch `routines/daily-digest` and open a PR
+         (or push directly to main if config.yaml > daily_digest.push_direct: true).
+      4. Log outcome with `increment_signal: true` if there was any activity
+         today, false on empty days.
+
+  - id: weekly-dep-audit
+    purpose: "Audit dependencies for known vulnerabilities and outdated majors."
+    primitive: scheduled
+    trigger_default: "9:00 AM Mondays"
+    automation_default: auto
+    self_evolve: true
+    success_criterion: "0 high/critical vulnerabilities for 4 consecutive runs"
+    stack_hints: [package.json, pyproject.toml, Cargo.toml, go.mod]
+    prompt_body: |
+      Audit dependencies. Your job:
+
+      1. Detect package manager. Run the appropriate audit:
+         - npm/pnpm/yarn: `<pm> audit --json`
+         - pip: `pip-audit --format json` (install if missing)
+         - cargo: `cargo audit --json`
+         - go: `govulncheck ./... -json`
+      2. Parse vulnerabilities. Group by severity (critical, high, medium, low).
+      3. For critical+high:
+         a. Read the advisory. Determine if a non-breaking patch version exists.
+         b. If yes: bump the version in the manifest. Run tests. If green,
+            branch `routines/weekly-dep-audit`, commit, PR with the advisory link.
+         c. If no (requires major bump): write a TODO file under
+            `.iteration/proposals/dep-audit-<date>.md` with the affected
+            packages, severity, and migration notes. Do not auto-bump majors.
+      4. For medium/low: append to `.iteration/dep-audit-backlog.md` for the
+         user to schedule.
+      5. Log `increment_signal: true` if you opened a PR or wrote a proposal.
+
+  - id: release-tag-checker
+    purpose: "When a release commit goes in without a version bump, flag it."
+    primitive: git-hook
+    trigger_default: "on every git commit"
+    automation_default: auto
+    self_evolve: false
+    success_criterion: "no missed version bumps in last 10 release commits"
+    stack_hints: [package.json, pyproject.toml, Cargo.toml, version.py]
+    prompt_body: |
+      The user just committed. Your job:
+
+      1. Read the commit message of HEAD. If it starts with `release:` or
+         `chore(release):` or matches /^v\d+\.\d+/, treat as a release commit.
+      2. For release commits:
+         a. Detect the version file (package.json, pyproject.toml, Cargo.toml,
+            <module>/__init__.py, version.py, VERSION).
+         b. Compare the version field at HEAD vs HEAD~1. If unchanged:
+            i.   Branch `routines/release-tag-checker`.
+            ii.  Bump patch by default (or whatever config.yaml > release.bump
+                 says: patch | minor | none).
+            iii. Commit `chore(release): bump version to X.Y.Z`.
+            iv.  Open PR titled "Missed version bump for <release SHA>".
+            v.   Log `increment_signal: true`.
+         c. If version was bumped, log `outcome: ok, increment_signal: false`.
+      3. For non-release commits, exit immediately.
