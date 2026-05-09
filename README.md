@@ -1,14 +1,21 @@
 # auto-routines
 
+[![CI](https://github.com/paipeline/auto-routines/actions/workflows/ci.yml/badge.svg)](https://github.com/paipeline/auto-routines/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-black.svg)](LICENSE)
+[![Claude Code](https://img.shields.io/badge/Claude%20Code-skill-black.svg)](https://docs.claude.com/claude-code)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-black.svg)](CONTRIBUTING.md)
+[![TDD](https://img.shields.io/badge/dev-TDD-black.svg)](CONTRIBUTING.md#tdd-workflow)
+
 > **Automation is the best harness.** A discipline agents don't maintain is a harness agents don't have. Let your repo wear the harness for you.
 
 ### 1–100 agents, working on your repo 24/7. Seconds to put to work.
 
 ```
 1.  cd into any repo
-2.  answer 4 questions  (90 seconds)
-3.  close the laptop
-4.  come back to a repo that has been maintaining itself
+2.  answer the setup questions
+3.  keep the laptop / server running
+4.  go get some fresh air for a few days
+5.  come back to a repo that has been developing and maintaining itself
 ```
 
 `auto-routines` autoconfigures the harness — routines, hooks, scheduled tasks, real `.git/hooks/post-commit` scripts, PR-comment agents — and from there it runs and evolves *itself*. Pick one of two modes:
@@ -102,6 +109,19 @@ You never maintained the discipline. The repo did.
 /auto-routines plan         # re-render plan.mmd
 /auto-routines revert iter-007
 ```
+
+---
+
+## Contributing
+
+PRs and issues are welcome. The project is developed **test-first** — every guardrail has a failing test before the check that makes it pass. See [CONTRIBUTING.md](CONTRIBUTING.md) for the dev loop, ground rules, and the TDD workflow.
+
+```bash
+pip install pyyaml pytest
+pytest -q          # 56 tests, ~70ms
+```
+
+Good first issues are tagged [`good first issue`](https://github.com/paipeline/auto-routines/issues?q=is%3Aopen+is%3Aissue+label%3A%22good+first+issue%22). Routine proposals go through the [feature-request template](.github/ISSUE_TEMPLATE/feature_request.yml).
 
 ---
 
