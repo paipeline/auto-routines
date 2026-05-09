@@ -116,11 +116,46 @@ def test_archetype_prompt_bodies_mention_real_work_idioms(catalog, must_contain,
 
 
 def test_expected_archetypes_are_present(catalog):
-    """The four user-described routines from the bug report must exist as
-    archetypes — that's the regression this whole catalog fixes."""
+    """The user-described routines from the bug reports must exist as archetypes:
+    - the four maintenance routines (commit-tests, commit-lint, session-test-gap,
+      session-doc-drift) — first bug report.
+    - prd-implement — the "drive the project forward on a schedule" routine.
+      Without this, the skill installs only reactive maintenance and never
+      makes feature progress; that was the second bug report."""
     ids = {arch["id"] for arch in catalog["archetypes"]}
-    for required in {"commit-tests", "commit-lint", "session-test-gap", "session-doc-drift"}:
+    for required in {
+        "commit-tests", "commit-lint",
+        "session-test-gap", "session-doc-drift",
+        "prd-implement",
+    }:
         assert required in ids, f"missing expected archetype: {required}"
+
+
+def test_prd_implement_drives_feature_work(catalog):
+    """prd-implement is the routine that pushes feature work forward.
+    It must be scheduled (not reactive), it must read .iteration/goal.md,
+    and its body must mandate writing code + tests + PR (not just plans)."""
+    arch = next(a for a in catalog["archetypes"] if a["id"] == "prd-implement")
+    assert arch["primitive"] == "scheduled", (
+        "prd-implement must be scheduled — that's the whole point: "
+        "drive PRD forward without waiting for a commit"
+    )
+    body = arch["prompt_body"].lower()
+    # Must read the goal
+    assert ".iteration/goal.md" in body, (
+        "prd-implement must read .iteration/goal.md as the PRD source"
+    )
+    # Must mandate code + tests, not just plans
+    for phrase in ["write the failing test", "write the minimum code"]:
+        assert phrase in body, (
+            f"prd-implement body must include {phrase!r} — TDD is the "
+            "guard against drifting back to 'plan only'"
+        )
+    # Must explicitly forbid plan-only output
+    assert "do not plan-only" in body or "do not print findings" in body, (
+        "prd-implement body must explicitly forbid plan-only output — "
+        "that was the bug the archetype exists to fix"
+    )
 
 
 # ---------------------------------------------------------------------------

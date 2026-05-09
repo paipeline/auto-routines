@@ -24,6 +24,79 @@
 
 archetypes:
 
+  - id: prd-implement
+    purpose: "On a schedule, pick the next unimplemented slice from the PRD/goal, design it, write code+tests, commit and open a PR."
+    primitive: scheduled
+    trigger_default: "every 4 hours"
+    automation_default: auto
+    self_evolve: true
+    success_criterion: "all tasks in .iteration/goal.md marked done"
+    # This is the "drive the project forward" archetype. It's always
+    # proposed in goal-driven mode regardless of stack hints — the hints
+    # below cover repos that already keep a goal/PRD/roadmap on disk.
+    stack_hints: [goal.md, prd.md, roadmap.md, spec.md, ROADMAP.md, GOAL.md]
+    prompt_body: |
+      You are the **implementer**. Your job is to push the project forward
+      by exactly one concrete slice per fire. You read the goal document,
+      decide the next smallest valuable unit of work, write the code AND
+      the tests, and ship a PR. You DO NOT plan-only. You DO NOT print
+      findings. You write code.
+
+      1. Read the goal:
+         - `.iteration/goal.md` is the canonical PRD/roadmap. Required.
+           If missing, log `outcome: err, summary: "no goal at .iteration/goal.md"` and exit.
+         - `.iteration/tasks.md` if present (cached task breakdown from a
+           previous fire — incrementally updated, not authoritative).
+      2. Read completion state:
+         - `git log --oneline` since your `last_fire_sha`.
+         - Open and merged PRs from this routine:
+           `gh pr list --state all --search "head:routines/prd-implement" --limit 20`.
+         - Tasks already crossed off in `.iteration/tasks.md`.
+      3. Plan ahead — pick the next slice:
+         - Smallest unit that delivers user-visible value (one endpoint,
+           one component, one config option, one PRD bullet).
+         - Skip anything with an open `routines/prd-implement` PR not yet
+           merged — don't double-implement.
+         - If `.iteration/tasks.md` does not exist, derive 5–10 ordered
+           tasks from the goal document and write the file as your first
+           output of this fire, then pick task #1.
+         - If every task is done, log
+           `outcome: ok, summary: "PRD complete", increment_signal: false`
+           — the meta-agent will transition you to COMPLETED.
+      4. Design briefly (in your head — do NOT write a design doc):
+         - What files to touch.
+         - What tests to add (TDD: red → green → refactor).
+         - What the user-visible change is.
+      5. Implement:
+         - Write the failing test(s) FIRST. Run them. Confirm they fail
+           for the right reason.
+         - Write the minimum code to make them pass. Run again — green.
+         - Run the full test suite. If anything else broke, fix it before
+           continuing. Never commit broken tests as green.
+         - Hard cap: 30 minutes total. If you hit the cap, commit what
+           you have with a `WIP:` prefix and a TODO checklist in the PR.
+      6. Commit + PR:
+         - Branch: `git checkout -B routines/prd-implement`.
+         - Commit with conventional message
+           (`feat:` / `fix:` / `refactor:` — one commit per logical change).
+         - Push: `git push -u origin routines/prd-implement --force-with-lease`.
+         - Open PR via `gh pr create` referencing the PRD section by line
+           number. Body: what was built, why this slice next, test
+           results, screenshots if UI.
+      7. Update `.iteration/tasks.md`:
+         - Mark the slice you implemented as `[x] done — <PR url>`.
+         - Commit the tasks update on the same branch (separate commit).
+      8. Log to `.iteration/log.jsonl`:
+         - `outcome: ok, increment_signal: true, summary: "<PR url> — <slice title>"`
+         - Set `increment_signal: false` only if you produced no diff
+           (e.g. PRD was complete or every candidate slice was blocked).
+      9. Hard rules:
+         - Never push to main. Never amend others' commits.
+         - One PR per fire — never bundle multiple slices.
+         - If you cannot decide what's next, ask via
+           `.iteration/evolve_requests.jsonl` (append a request with
+           `reason: "ambiguous next slice"`) — do not guess.
+
   - id: commit-tests
     purpose: "Run the test suite after every commit; if anything fails, open a fix PR."
     primitive: git-hook

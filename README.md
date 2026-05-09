@@ -31,6 +31,7 @@ Every change the meta-agent makes is a git commit. Revert any of them with one c
 
 | | **Before auto-routines** | **After auto-routines** |
 |---|---|---|
+| **Who pushes the PRD forward** | **You, when you have time** | **A 4-hour routine that reads `.iteration/goal.md`, picks the next slice, writes code + tests, opens a PR** |
 | Who runs the tests | You, when you remember | A post-commit routine, every commit |
 | Who reads the CI log | You, after a Slack ping | A 15-min watcher, comments the failing line on the PR |
 | Who writes the daily digest | Nobody — you "will later" | An 18:00 routine, drops it in `.iteration/digests/` |

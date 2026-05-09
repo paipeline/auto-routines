@@ -9,6 +9,8 @@ You are operating the `auto-routines` skill. The user wants their repository to 
 
 **This skill is not a planner. It installs and writes code.** When `init` runs, it must produce real artifacts on disk: a `.git/hooks/post-commit` shell script, entries in `.claude/settings.json`, scheduled-task IDs returned from the MCP, per-routine SKILL.md files filled with concrete prompts (sourced from `templates/routine-catalog.yaml`). Routines themselves, when fired, must produce real diffs — they branch on `routines/<id>`, commit, push, open PRs. Never stop at "here's the plan, looks good?" — that's the failure mode this skill exists to fix.
 
+**Reactive maintenance is not enough.** The catalog ships a `prd-implement` archetype whose job is to push the PRD forward one slice per fire (read `.iteration/goal.md`, plan ahead, write code + tests, PR). In `goal-driven` mode the interview always proposes it. Without that routine the install only *reacts* to commits — it never *makes* feature progress on its own.
+
 ## Modes
 
 Detect mode from the user's invocation:
@@ -87,7 +89,8 @@ STOPPED    → ACTIVE       only via explicit `/auto-routines start <id>` (reset
    - **Goal**: "What's the goal of this project (one sentence)?"
    - **Mode**: pick `goal-driven` or `fully-auto`.
    - **MCPs**: multi-select from connected MCPs.
-   - **Candidate routines**: read `templates/routine-catalog.yaml`. Match each archetype's `stack_hints` against the analysis from step 3 and propose 4–8 candidates (the matched archetypes plus 1–2 obvious gap-fillers). Show the user the archetype `id` + `purpose` and let them multi-select which to install.
+   - **Goal capture (goal-driven mode only)**: if mode is `goal-driven`, ask the user where the PRD/roadmap lives. If they don't have one yet, offer to write `.iteration/goal.md` from their goal sentence (single bullet list of 5–10 tasks). The `prd-implement` archetype reads this file every fire — without it the skill cannot drive feature work, only react to commits.
+   - **Candidate routines**: read `templates/routine-catalog.yaml`. Match each archetype's `stack_hints` against the analysis from step 3 and propose 4–8 candidates (the matched archetypes plus 1–2 obvious gap-fillers). Show the user the archetype `id` + `purpose` and let them multi-select which to install. **In `goal-driven` mode you MUST always include `prd-implement` in the candidate list, regardless of stack hints — that archetype is the one that pushes the PRD forward on a schedule. Without it the install is just reactive maintenance.**
    - **For each selected candidate, ask three questions in order:**
      1. **Frequency** (multi-choice — never show cron in the UI):
         ```
