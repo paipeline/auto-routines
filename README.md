@@ -23,23 +23,22 @@ Most automation tools install once and rot. This one rewrites itself.
 
 ```mermaid
 flowchart TD
-  classDef meta fill:#f9f,stroke:#333,stroke-width:2px;
-  classDef step fill:#bbf,stroke:#333;
-  classDef gate fill:#fdd,stroke:#900;
+  classDef node fill:#fff,stroke:#000,color:#000;
+  linkStyle default stroke:#000;
 
-  A["/auto-routines init"]:::meta --> B[analyze stack, tests, CI, git activity]:::step
-  B --> C[interview: goal, mode, MCPs, candidate routines]:::step
-  C --> D[render plan.mmd + sanity check]:::gate
-  D --> E[install: hooks, scheduled tasks, git hooks, loop launchers]:::step
-  E --> F[meta-routine scheduled daily]:::meta
+  A["/auto-routines init"]:::node --> B[analyze stack, tests, CI, git activity]:::node
+  B --> C[interview: goal, mode, MCPs, candidate routines]:::node
+  C --> D[render plan.mmd + sanity check]:::node
+  D --> E[install: hooks, scheduled tasks, git hooks, loop launchers]:::node
+  E --> F[meta-routine scheduled daily]:::node
 
-  F --> G["/auto-routines evolve (auto, daily)"]:::meta
-  G --> H[gather signals: commits, PRs, CI, log.jsonl]:::step
-  H --> I[decide: add / remove / retune]:::step
-  I --> J[sanity check the new config]:::gate
-  J --> K[checkpoint commit iter-NNN]:::step
-  K --> L[apply changes, neutralize orphans]:::step
-  L --> M[re-render plan.mmd, write history]:::step
+  F --> G["/auto-routines evolve (auto, daily)"]:::node
+  G --> H[gather signals: commits, PRs, CI, log.jsonl]:::node
+  H --> I[decide: add / remove / retune]:::node
+  I --> J[sanity check the new config]:::node
+  J --> K[checkpoint commit iter-NNN]:::node
+  K --> L[apply changes, neutralize orphans]:::node
+  L --> M[re-render plan.mmd, write history]:::node
   M --> G
 ```
 
@@ -76,18 +75,17 @@ changes:
 
 ```mermaid
 flowchart TD
-  classDef meta fill:#f9f,stroke:#333,stroke-width:2px;
-  classDef routine fill:#bbf,stroke:#333;
-  classDef trigger fill:#dfd,stroke:#333;
+  classDef node fill:#fff,stroke:#000,color:#000;
+  linkStyle default stroke:#000;
 
-  GOAL["Goal: ship v1.0 with great test coverage<br/>Mode: fully-auto"]:::meta
-  META["Meta /auto-routines evolve<br/>cron: 0 9 * * * — next: tomorrow 09:00"]:::meta
+  GOAL["Goal: ship v1.0 with great test coverage<br/>Mode: fully-auto"]:::node
+  META["Meta /auto-routines evolve<br/>cron: 0 9 * * * — next: tomorrow 09:00"]:::node
   GOAL --> META
 
-  T1["every 15 min<br/>(*/15 * * * *)"]:::trigger --> R1["pr-ci-watcher<br/>comment on failing PRs"]:::routine
-  T2["18:00 daily<br/>(0 18 * * *)"]:::trigger --> R2["daily-digest<br/>summary of the day"]:::routine
-  T3["weekdays 17:00<br/>(0 17 * * 1-5)"]:::trigger --> R3["doc-drift-fixer<br/>README ↔ src/api/"]:::routine
-  T4["git post-commit<br/>(.git/hooks/post-commit)"]:::trigger --> R4["test-runner-nudge<br/>nudge to run tests"]:::routine
+  T1["every 15 min<br/>(*/15 * * * *)"]:::node --> R1["pr-ci-watcher<br/>comment on failing PRs"]:::node
+  T2["18:00 daily<br/>(0 18 * * *)"]:::node --> R2["daily-digest<br/>summary of the day"]:::node
+  T3["weekdays 17:00<br/>(0 17 * * 1-5)"]:::node --> R3["doc-drift-fixer<br/>README ↔ src/api/"]:::node
+  T4["git post-commit<br/>(.git/hooks/post-commit)"]:::node --> R4["test-runner-nudge<br/>nudge to run tests"]:::node
 
   META -.->|may tune| R1
   META -.->|may tune| R2
