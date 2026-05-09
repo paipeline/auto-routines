@@ -1,0 +1,136 @@
+# .iteration/config.yaml — self-hosted install of auto-routines on its own repo.
+# Goal: meta-improve the skill autonomously. PRD lives in .iteration/goal.md.
+
+schema_version: 3
+repo_slug: "auto-routines"
+goal: "Evolve auto-routines into a robust, well-tested, self-improving skill that other repos use without surprises."
+mode: goal-driven
+created_at: "2026-05-09T19:17:24+0200"
+last_iter: 1
+
+deps:
+  gh: required
+  mcps:
+    - scheduled-tasks
+
+routines:
+  - id: prd-implement
+    state: ACTIVE
+    enabled: true
+    primitive: scheduled
+    trigger:
+      cron: "0 */4 * * *"
+      human: "every 4 hours"
+    purpose: "On a schedule, pick the next unimplemented slice from .iteration/goal.md, design it, write code+tests, commit and open a PR."
+    success_criterion: "all tasks in .iteration/goal.md marked done"
+    stagnation_threshold: 5
+    self_evolve: true
+    automation_level: auto
+    prompt_skill: prd-implement
+    iter_added: 1
+    task_id: "auto-routines-auto-routines-prd-implement"
+    last_outcome_summary: ""
+    stats:
+      runs: 0
+      useful: 0
+      noisy: 0
+      last_useful_iter: null
+
+  - id: commit-tests
+    state: ACTIVE
+    enabled: true
+    primitive: git-hook
+    trigger:
+      human: "on every git commit"
+    purpose: "Run pytest after every commit; if it fails, open a fix PR."
+    success_criterion: "all tests green for 50 consecutive commits"
+    stagnation_threshold: 7
+    self_evolve: false
+    automation_level: auto
+    prompt_skill: commit-tests
+    iter_added: 1
+    task_id: ""
+    last_outcome_summary: ""
+    stats:
+      runs: 0
+      useful: 0
+      noisy: 0
+      last_useful_iter: null
+
+  - id: commit-lint
+    state: ACTIVE
+    enabled: true
+    primitive: git-hook
+    trigger:
+      human: "on every git commit"
+    purpose: "Run linters after every commit; auto-fix and PR when violations exist."
+    success_criterion: "0 lint violations in last 20 commits"
+    stagnation_threshold: 7
+    self_evolve: false
+    automation_level: auto
+    prompt_skill: commit-lint
+    iter_added: 1
+    task_id: ""
+    last_outcome_summary: ""
+    stats:
+      runs: 0
+      useful: 0
+      noisy: 0
+      last_useful_iter: null
+
+  - id: session-doc-drift
+    state: ACTIVE
+    enabled: true
+    primitive: scheduled
+    trigger:
+      cron: "0 17 * * 1-5"
+      human: "5:00 PM weekdays"
+    purpose: "On weekday evenings, update README/SKILL.md/catalog when they diverge from code."
+    success_criterion: "docs in sync with code for 7 consecutive sessions"
+    stagnation_threshold: 7
+    self_evolve: true
+    automation_level: auto
+    prompt_skill: session-doc-drift
+    iter_added: 1
+    task_id: "auto-routines-auto-routines-session-doc-drift"
+    last_outcome_summary: ""
+    stats:
+      runs: 0
+      useful: 0
+      noisy: 0
+      last_useful_iter: null
+
+  - id: daily-digest
+    state: ACTIVE
+    enabled: true
+    primitive: scheduled
+    trigger:
+      cron: "0 18 * * *"
+      human: "6:00 PM daily"
+    purpose: "Summarize today's commits, PRs, and routine activity into .iteration/digests/."
+    success_criterion: ""
+    stagnation_threshold: 14
+    self_evolve: false
+    automation_level: auto
+    prompt_skill: daily-digest
+    iter_added: 1
+    task_id: "auto-routines-auto-routines-daily-digest"
+    last_outcome_summary: ""
+    stats:
+      runs: 0
+      useful: 0
+      noisy: 0
+      last_useful_iter: null
+
+neutralized_tasks: []
+
+pending_evolve_requests: []
+
+meta:
+  cron: "0 9 * * *"
+  human: "9:00 AM daily"
+  task_id: "auto-routines-auto-routines-meta"
+  last_run: null
+  anti_flap_window: 3
+  default_stagnation_threshold: 5
+  process_evolve_requests: true
