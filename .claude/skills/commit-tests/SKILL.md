@@ -1,6 +1,6 @@
 ---
 name: commit-tests
-description: Run pytest after every commit; if it fails, open a fix PR. — installed by auto-routines on 2026-05-09T22:16:01+02:00, iter-1. Invoked by git-hook trigger (on every git commit).
+description: Run pytest after every commit; if it fails, open a fix PR. — installed by auto-routines on 2026-05-09T22:31:14+02:00, iter-1. Invoked by git-hook trigger (on every git commit).
 ---
 
 # commit-tests

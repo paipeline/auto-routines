@@ -44,6 +44,24 @@ broken installs, or routines that drift back to "analyze only."
 - [ ] Surface the first routine PR opened by a fresh install in the welcome
       output ("your first auto-PR will land at ~6:00 PM").
 
+### Dynamic dispatch (added iter-003 — user feedback: each run must include a central agent)
+- [x] Replace per-routine cron tasks with one **coordinator** routine that
+      reads a structured brief and dispatches the appropriate routine(s) per
+      fire. Implemented `scripts/coordinator-brief.py` (pure shell, no LLM
+      tokens), `coordinator` archetype in the catalog, and the matching MCP
+      scheduled task. `prd-implement` and `session-doc-drift` are now
+      dispatched (no own cron). `daily-digest` keeps its 6 PM cron because
+      it's time-pinned reporting, not discretionary work.
+- [ ] Move `daily-digest` under the coordinator too: extend the coordinator
+      cron to include 6 PM (e.g. `0 6,18 * * *`) and gate the digest
+      dispatch on time-of-day from inside the brief. Removes the last
+      non-coordinator scheduled task.
+- [ ] Add a coordinator stagnation rule to the brief: if the last N
+      coordinator decisions were all `noop`, surface a banner so the user
+      knows the system is idle (vs. silently churning).
+- [ ] Document the coordinator/dispatcher pattern in README and
+      SKILL.md (new section: "How a fire flows").
+
 ### Token frugality (added iter-002 — user feedback: skill is consuming too many tokens)
 - [x] `/auto-routines status` MUST be a pure-script call with no Claude tokens.
       Added `scripts/status.py`; SKILL.md `Mode: status` now invokes it directly.

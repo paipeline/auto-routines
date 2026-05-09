@@ -1,6 +1,6 @@
 ---
 name: commit-lint
-description: Run linters after every commit; auto-fix and PR when violations exist. — installed by auto-routines on 2026-05-09T22:16:01+02:00, iter-1. Invoked by git-hook trigger (on every git commit).
+description: Run linters after every commit; auto-fix and PR when violations exist. — installed by auto-routines on 2026-05-09T22:31:14+02:00, iter-1. Invoked by git-hook trigger (on every git commit).
 ---
 
 # commit-lint

@@ -11,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SANITY_PATH = ROOT / "scripts" / "sanity-check.py"
 STATUS_PATH = ROOT / "scripts" / "status.py"
+BRIEF_PATH = ROOT / "scripts" / "coordinator-brief.py"
 
 
 def _load_module(name: str, path: Path):
@@ -24,3 +25,4 @@ def _load_module(name: str, path: Path):
 
 sanity = _load_module("sanity_check", SANITY_PATH)
 status = _load_module("status", STATUS_PATH)
+brief = _load_module("coordinator_brief", BRIEF_PATH)

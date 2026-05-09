@@ -1,6 +1,6 @@
 ---
 name: prd-implement
-description: On a schedule, pick the next unimplemented slice from .iteration/goal.md, design it, write code+tests, commit and open a PR. — installed by auto-routines on 2026-05-09T22:16:01+02:00, iter-1. Invoked by scheduled trigger (every 12 hours).
+description: On a schedule, pick the next unimplemented slice from .iteration/goal.md, design it, write code+tests, commit and open a PR. — installed by auto-routines on 2026-05-09T22:31:14+02:00, iter-1. Invoked by scheduled trigger (dispatched by coordinator (no own schedule)).
 ---
 
 # prd-implement
@@ -9,7 +9,7 @@ description: On a schedule, pick the next unimplemented slice from .iteration/go
 On a schedule, pick the next unimplemented slice from .iteration/goal.md, design it, write code+tests, commit and open a PR.
 
 ## Trigger
-every 12 hours
+dispatched by coordinator (no own schedule)
 
 ## Success criterion
 all tasks in .iteration/goal.md marked done

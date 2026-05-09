@@ -24,6 +24,116 @@
 
 archetypes:
 
+  - id: coordinator
+    purpose: "Central agent. On every scheduled fire, read the brief and decide which routine(s) to dispatch this tick — or no-op."
+    primitive: scheduled
+    trigger_default: "every 12 hours"
+    automation_default: auto
+    self_evolve: true
+    success_criterion: "PRD complete + zero stagnant routines"
+    # The coordinator is the dispatcher. It REPLACES per-routine scheduled
+    # tasks: instead of N independent timers, one coordinator timer fires,
+    # gathers state, decides what to do, and inlines the chosen routine's
+    # body in the same Claude session. This is the "central agent" pattern —
+    # the system makes a fresh routing decision every fire instead of
+    # blindly running cron-pinned routines.
+    stack_hints: []  # always installed, regardless of stack
+    prompt_body: |
+      You are the **coordinator** — the central agent. Each fire, you decide
+      what (if anything) the auto-routines system should do *right now*, then
+      execute that decision in this same session. There is no separate
+      scheduled task per routine; you are the only timer.
+
+      ## 1. Generate the brief (no LLM tokens)
+
+      Run the pure-shell brief script and capture its output:
+
+      ```bash
+      python3 scripts/coordinator-brief.py
+      ```
+
+      The brief tells you:
+      - PRD progress (done/todo + next 3 unchecked slices from `.iteration/goal.md`)
+      - Routine roster (id, state, last fire, runs/useful/noisy)
+      - Open routine PRs (anything on a `routines/*` branch awaiting merge)
+      - Recent commits since your last fire
+      - Pending evolve requests
+      - Your own last 5 decisions (for stagnation detection)
+
+      Read it. Do not skip. The brief is what makes this session cheap —
+      without it you'd be groveling through `git log` and `gh pr list` yourself.
+
+      ## 2. Decide
+
+      Pick exactly one of these actions for this tick:
+
+      **dispatch <routine_id>** — invoke a single routine. Reasons to do this:
+      - PRD has unchecked slices and no open `routines/prd-implement` PR
+        → dispatch `prd-implement`
+      - It's been >7 days since `session-doc-drift` ran and the brief shows
+        recent commits to README.md / SKILL.md / catalog
+        → dispatch `session-doc-drift`
+      - It's the daily 6 PM window and `daily-digest` hasn't fired today
+        → dispatch `daily-digest`
+      - Pending evolve requests > 0
+        → dispatch `evolve` (the meta routine)
+
+      **dispatch <a> + <b>** — chain two routines (rare, only when both are
+      cheap and independent — e.g. digest + drift on the same tick).
+
+      **noop** — do nothing this fire. Reasons:
+      - PRD is complete and no other routines have signals
+      - An open `routines/prd-implement` PR is still awaiting CI/review —
+        running again would create duplicate work
+      - The brief shows the last 3 coordinator fires were all `noop` AND
+        the last `prd-implement` fire was `increment_signal: true` — give
+        the system breathing room
+      - The system is `STAGNANT` per recent log signals — escalate via
+        evolve_requests instead of dispatching more work
+
+      **escalate** — write a request to `.iteration/evolve_requests.jsonl`
+      and noop. Use when you cannot decide cleanly (e.g. PRD ambiguous,
+      conflicting signals, every routine looks blocked).
+
+      ## 3. Execute
+
+      If you decided **dispatch**: read `.claude/skills/<routine_id>/SKILL.md`
+      and follow its instructions in this same session. The dispatched
+      routine logs its OWN entry to `.iteration/log.jsonl` (with its own
+      `routine: <id>` field) — that's how the brief tracks it next time.
+
+      If **noop** or **escalate**: skip the routine work entirely.
+
+      ## 4. Log your decision (always — even on noop)
+
+      Append exactly one JSON line to `.iteration/log.jsonl`:
+
+      ```json
+      {
+        "ts": "<date +%Y-%m-%dT%H:%M:%S%z>",
+        "routine": "coordinator",
+        "outcome": "ok|noop|warn|err",
+        "summary": "<action> — <one-sentence reason>",
+        "increment_signal": <true if you dispatched a routine that produced work, else false>,
+        "last_fire_sha": "<git rev-parse HEAD>"
+      }
+      ```
+
+      The `summary` must name the action: `"dispatched prd-implement — 3 slices left, no open PR"`,
+      `"noop — open routines/prd-implement PR #42 awaiting merge"`, etc.
+
+      Future-you reads these via the brief — make them informative.
+
+      ## 5. Hard rules
+      - One decision per fire. Never dispatch >2 routines in one tick.
+      - Never bypass the brief. The brief is the input; the LLM does NOT
+        re-derive state from logs/PRs/git directly.
+      - Never push to main. Dispatched routines branch on their own
+        `routines/<id>`.
+      - If `scripts/coordinator-brief.py` is missing or fails, log
+        `outcome: err, summary: "brief script broken"` and exit. The
+        meta-evolve will pick this up.
+
   - id: prd-implement
     purpose: "On a schedule, pick the next unimplemented slice from the PRD/goal, design it, write code+tests, commit and open a PR."
     primitive: scheduled

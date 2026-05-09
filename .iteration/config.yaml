@@ -6,7 +6,7 @@ repo_slug: "auto-routines"
 goal: "Evolve auto-routines into a robust, well-tested, self-improving skill that other repos use without surprises."
 mode: goal-driven
 created_at: "2026-05-09T19:17:24+0200"
-last_iter: 1
+last_iter: 3
 
 deps:
   gh: required
@@ -14,13 +14,34 @@ deps:
     - scheduled-tasks
 
 routines:
-  - id: prd-implement
+  - id: coordinator
     state: ACTIVE
     enabled: true
     primitive: scheduled
     trigger:
       cron: "0 */12 * * *"
       human: "every 12 hours"
+    purpose: "Central agent: read the brief and decide which routine(s) to dispatch this fire."
+    success_criterion: "PRD complete + zero stagnant routines"
+    stagnation_threshold: 7
+    self_evolve: true
+    automation_level: auto
+    prompt_skill: coordinator
+    iter_added: 3
+    task_id: "auto-routines-auto-routines-coordinator"
+    last_outcome_summary: ""
+    stats:
+      runs: 0
+      useful: 0
+      noisy: 0
+      last_useful_iter: null
+
+  - id: prd-implement
+    state: ACTIVE
+    enabled: true
+    primitive: scheduled
+    trigger:
+      human: "dispatched by coordinator (no own schedule)"
     purpose: "On a schedule, pick the next unimplemented slice from .iteration/goal.md, design it, write code+tests, commit and open a PR."
     success_criterion: "all tasks in .iteration/goal.md marked done"
     stagnation_threshold: 5
@@ -28,7 +49,7 @@ routines:
     automation_level: auto
     prompt_skill: prd-implement
     iter_added: 1
-    task_id: "auto-routines-auto-routines-prd-implement"
+    task_id: ""
     last_outcome_summary: ""
     stats:
       runs: 0
@@ -83,8 +104,7 @@ routines:
     enabled: true
     primitive: scheduled
     trigger:
-      cron: "0 17 * * 1"
-      human: "5:00 PM Mondays"
+      human: "dispatched by coordinator (no own schedule)"
     purpose: "Weekly, update README/SKILL.md/catalog when they diverge from code."
     success_criterion: "docs in sync with code for 7 consecutive sessions"
     stagnation_threshold: 7
@@ -92,7 +112,7 @@ routines:
     automation_level: auto
     prompt_skill: session-doc-drift
     iter_added: 1
-    task_id: "auto-routines-auto-routines-session-doc-drift"
+    task_id: ""
     last_outcome_summary: ""
     stats:
       runs: 0
@@ -122,7 +142,15 @@ routines:
       noisy: 0
       last_useful_iter: null
 
-neutralized_tasks: []
+neutralized_tasks:
+  - task_id: "auto-routines-auto-routines-prd-implement"
+    original_routine_id: "prd-implement"
+    neutralized_at_iter: 3
+    reason: "dispatched by coordinator (iter-3)"
+  - task_id: "auto-routines-auto-routines-session-doc-drift"
+    original_routine_id: "session-doc-drift"
+    neutralized_at_iter: 3
+    reason: "dispatched by coordinator (iter-3)"
 
 pending_evolve_requests: []
 

@@ -195,6 +195,25 @@ def test_scheduled_routine_requires_cron(base_config):
     assert any("cron" in e for e in errors)
 
 
+def test_scheduled_routine_without_cron_ok_when_dispatched(base_config):
+    """A scheduled routine may omit cron if trigger.human documents the
+    dispatch source (e.g. 'dispatched by coordinator'). This is the
+    coordinator/dispatcher pattern introduced in iter-003."""
+    base_config["routines"][0]["trigger"] = {
+        "human": "dispatched by coordinator (no own schedule)"
+    }
+    errors = sanity.check(base_config)
+    # Filter to errors mentioning trigger or cron — there should be none.
+    trigger_errors = [e for e in errors if "trigger" in e or "cron" in e]
+    assert not trigger_errors, f"unexpected trigger errors: {trigger_errors}"
+
+
+def test_scheduled_routine_without_cron_or_human_fails(base_config):
+    base_config["routines"][0]["trigger"] = {}
+    errors = sanity.check(base_config)
+    assert any("dispatch" in e or "cron" in e or "human" in e for e in errors)
+
+
 @pytest.mark.parametrize(
     "cron",
     [

@@ -1,6 +1,6 @@
 ---
 name: session-doc-drift
-description: Weekly, update README/SKILL.md/catalog when they diverge from code. — installed by auto-routines on 2026-05-09T22:16:01+02:00, iter-1. Invoked by scheduled trigger (5:00 PM Mondays).
+description: Weekly, update README/SKILL.md/catalog when they diverge from code. — installed by auto-routines on 2026-05-09T22:31:14+02:00, iter-1. Invoked by scheduled trigger (dispatched by coordinator (no own schedule)).
 ---
 
 # session-doc-drift
@@ -9,7 +9,7 @@ description: Weekly, update README/SKILL.md/catalog when they diverge from code.
 Weekly, update README/SKILL.md/catalog when they diverge from code.
 
 ## Trigger
-5:00 PM Mondays
+dispatched by coordinator (no own schedule)
 
 ## Success criterion
 docs in sync with code for 7 consecutive sessions

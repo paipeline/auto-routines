@@ -215,7 +215,15 @@ def check(config: dict) -> list[str]:
             errors.append(f"{prefix} trigger.human must be a string")
         if prim in {"scheduled", "pr-poll"}:
             if "cron" not in trig:
-                errors.append(f"{prefix} primitive {prim!r} requires trigger.cron")
+                # Allowed: scheduled routine dispatched by another routine
+                # (e.g. the coordinator). trigger.human documents the source.
+                # Require *some* trigger documentation so the routine isn't a ghost.
+                if not trig.get("human"):
+                    errors.append(
+                        f"{prefix} scheduled routine without trigger.cron must set "
+                        f"trigger.human to document its dispatch source "
+                        f"(e.g. 'dispatched by coordinator')"
+                    )
             else:
                 ok, msg = cron_ok(trig["cron"])
                 if not ok:

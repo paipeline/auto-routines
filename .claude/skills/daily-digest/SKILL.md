@@ -1,6 +1,6 @@
 ---
 name: daily-digest
-description: Summarize today's commits, PRs, and routine activity into .iteration/digests/. — installed by auto-routines on 2026-05-09T22:16:01+02:00, iter-1. Invoked by scheduled trigger (6:00 PM daily).
+description: Summarize today's commits, PRs, and routine activity into .iteration/digests/. — installed by auto-routines on 2026-05-09T22:31:14+02:00, iter-1. Invoked by scheduled trigger (6:00 PM daily).
 ---
 
 # daily-digest
