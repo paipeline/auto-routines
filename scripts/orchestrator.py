@@ -661,6 +661,35 @@ def _make_parser() -> argparse.ArgumentParser:
             "still possible)."
         ),
     )
+
+    # fsm-plan: pure-script half of SKILL.md `Mode: evolve` step 4.
+    # For each ACTIVE routine, check `runs since last_useful_iter >=
+    # stagnation_threshold` and emit a JSON transition plan. The OTHER
+    # FSM transitions (reactivation, success_criterion-met) stay LLM-
+    # driven because they require natural-language signal interpretation;
+    # stagnation is pure arithmetic.
+    #
+    # PRD goal.md (Coverage and correctness): "Add tests for the
+    # `evolve` flow — drain evolve_requests.jsonl, perform the FSM
+    # transitions, write a checkpoint, apply, verify." This subcommand
+    # is the FSM-transitions half (deterministic subset).
+    fsm_p = sub.add_parser(
+        "fsm-plan",
+        help="Emit ACTIVE→STAGNANT transition plan for stagnant routines.",
+        description=(
+            "Scan routines in `--config`; for each ACTIVE routine with "
+            "runs since last_useful_iter >= stagnation_threshold (per "
+            "routine, falling back to meta.default_stagnation_threshold), "
+            "emit one JSON object on stdout. Pure-script, read-only, no "
+            "LLM tokens — the SKILL.md Mode: evolve step iterates these "
+            "plan lines instead of doing stats arithmetic itself."
+        ),
+    )
+    fsm_p.add_argument(
+        "--config",
+        required=True,
+        help="Path to .iteration/config.yaml",
+    )
     return p
 
 
@@ -964,6 +993,105 @@ def _cli_drain_evolve_requests(args, out, err) -> int:
     return 0
 
 
+# Default stagnation threshold when neither per-routine nor meta-level
+# override is set. Mirrors the value seeded by `init` in
+# templates/config.yaml so a hand-edited config can omit the field
+# and still get sensible behavior.
+_FSM_DEFAULT_STAGNATION_THRESHOLD = 7
+
+
+def _cli_fsm_plan(args, out, err) -> int:
+    """Emit ACTIVE→STAGNANT transition plan lines for stagnant routines.
+
+    Rule:  runs_since_useful = stats.runs - (stats.last_useful_iter or 0)
+    Trigger: runs_since_useful >= threshold
+    Threshold resolution (first that exists):
+        1. routine.stagnation_threshold
+        2. meta.default_stagnation_threshold
+        3. _FSM_DEFAULT_STAGNATION_THRESHOLD (=7)
+
+    Only routines with state == "ACTIVE" are candidates. Every other
+    state is either already-paused (STAGNANT, COMPLETED, STOPPED),
+    transient (EVOLVING), or pre-confirm (PROPOSED) — none can
+    transition to STAGNANT via this rule.
+
+    Pure read+emit: no config rewrite, no MCP, no network. The eventual
+    apply step (rewrite routines[].state = "STAGNANT") is a separate
+    concern shipped in a later slice."""
+    try:
+        config = _load_yaml(args.config)
+    except (OSError, Exception) as e:
+        print(f"config load failed: {e}", file=err)
+        return 1
+
+    if not isinstance(config, dict):
+        print("config root must be a mapping", file=err)
+        return 1
+
+    meta = (config.get("meta") or {}) if isinstance(config.get("meta"), dict) else {}
+    meta_default = meta.get("default_stagnation_threshold")
+    if not isinstance(meta_default, int) or isinstance(meta_default, bool) or meta_default < 1:
+        meta_default = _FSM_DEFAULT_STAGNATION_THRESHOLD
+
+    routines = config.get("routines") or []
+    if not isinstance(routines, list):
+        print("config.routines must be a list", file=err)
+        return 1
+
+    plan_entries: list[dict] = []
+
+    for r in routines:
+        if not isinstance(r, dict):
+            continue
+        if r.get("state") != "ACTIVE":
+            # Only ACTIVE routines are candidates. Everything else
+            # is already paused, terminal, or transient.
+            continue
+
+        # Threshold resolution: per-routine wins, else meta default,
+        # else built-in fallback.
+        rt = r.get("stagnation_threshold")
+        if isinstance(rt, int) and not isinstance(rt, bool) and rt >= 1:
+            threshold = rt
+        else:
+            threshold = meta_default
+
+        # Stats may be missing (hand-edited config) or partially
+        # populated (legacy install). Defaulting to a zero-runs view
+        # means a fresh routine can't be stagnant — matches intuition.
+        stats = r.get("stats") if isinstance(r.get("stats"), dict) else {}
+        runs = stats.get("runs", 0)
+        last_useful = stats.get("last_useful_iter")
+
+        # Coerce non-int runs to 0 — a typo in the YAML shouldn't
+        # crash the whole evolve fire. (Sanity-check would have caught
+        # it; we're being defensive about a config that bypassed it.)
+        if not isinstance(runs, int) or isinstance(runs, bool):
+            runs = 0
+        baseline = (
+            last_useful
+            if isinstance(last_useful, int) and not isinstance(last_useful, bool)
+            else 0
+        )
+        runs_since_useful = max(0, runs - baseline)
+
+        if runs_since_useful >= threshold:
+            plan_entries.append({
+                "routine_id": r.get("id", "?"),
+                "from": "ACTIVE",
+                "to": "STAGNANT",
+                "reason": (
+                    f"{runs_since_useful} runs since last useful outcome "
+                    f"(threshold={threshold})"
+                ),
+            })
+
+    for entry in plan_entries:
+        out.write(json.dumps(entry, sort_keys=True) + "\n")
+
+    return 0
+
+
 def _cli_test_fire(args, out, err) -> int:
     """Manual one-shot dispatch plan for `/auto-routines test-fire <id>`.
 
@@ -1058,6 +1186,9 @@ def cli_main(
 
     if args.command == "drain-evolve-requests":
         return _cli_drain_evolve_requests(args, out, err)
+
+    if args.command == "fsm-plan":
+        return _cli_fsm_plan(args, out, err)
 
     if args.command != "tick":
         print(f"unknown command: {args.command}", file=err)

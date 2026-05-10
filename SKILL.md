@@ -442,9 +442,29 @@ Fully auto. Every change is checkpointed and sanity-checked.
    - Read `.iteration/config.yaml`
    - `gh run list --limit 20` for CI failures
 4. **Run automatic FSM transitions** before deciding new changes:
-   - For each ACTIVE routine, check `success_criterion` against signals. If verifiably met → transition to COMPLETED, neutralize the schedule but keep `enabled: false` not the DELETED prefix (so it's re-openable).
-   - For each ACTIVE routine, count runs since `stats.last_useful_iter`. If `>= stagnation_threshold` (fall back to `meta.default_stagnation_threshold`) → transition to STAGNANT, neutralize.
-   - For each STAGNANT or COMPLETED routine, check if signals justify reactivation → transition back to ACTIVE.
+   - **ACTIVE → STAGNANT (deterministic — invoke the pure-script
+     emitter, don't eyeball the math)**:
+     ```bash
+     python3 scripts/orchestrator.py fsm-plan --config .iteration/config.yaml
+     ```
+     Each non-comment stdout line is a JSON object
+     `{routine_id, from, to, reason}` — one per stagnant routine.
+     For every plan line, transition the routine `state: ACTIVE →
+     STAGNANT` and neutralize its schedule (anti-flap pattern from
+     Guardrail 8). Surface the `reason` field in the user-facing
+     `iter-NNN.md` log. The subcommand resolves thresholds per-routine
+     first, then `meta.default_stagnation_threshold`, then a built-in
+     default of 7. Pinned by
+     `tests/test_orchestrator_cli.py::TestFsmPlan`.
+   - **ACTIVE → COMPLETED (LLM territory — natural-language match
+     between `success_criterion` and signals)**: for each ACTIVE
+     routine, check `success_criterion` against signals. If verifiably
+     met → transition to COMPLETED, neutralize the schedule but keep
+     `enabled: false` not the DELETED prefix (so it's re-openable).
+   - **STAGNANT/COMPLETED → ACTIVE (LLM territory — natural-language
+     match of signals to original purpose)**: for each STAGNANT or
+     COMPLETED routine, check if signals justify reactivation →
+     transition back to ACTIVE.
 5. **Decide** new ADD / REMOVE / RETUNE based on `mode`:
    - **goal-driven**: re-read iteration goal, propose routines that close the gap. If goal is met, write `.iteration/next-goal.md` and continue with current routines.
    - **fully-auto**: signals-driven (CI flake, PR queue depth, doc drift, commit cadence).

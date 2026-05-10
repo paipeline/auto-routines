@@ -1479,3 +1479,334 @@ class TestDrainEvolveRequests:
         assert entry["routine_id"] == "pr-ci-watcher"
         assert entry["suggested"] == "stop"
         assert entry["reason"] == "testing reason"
+
+
+# ---------------------------------------------------------------------------
+# fsm-plan: deterministic ACTIVE→STAGNANT transition detector
+# ---------------------------------------------------------------------------
+# PRD `.iteration/goal.md` (Coverage and correctness): "Add tests for the
+# `evolve` flow — drain evolve_requests.jsonl, perform the FSM
+# transitions, write a checkpoint, apply, verify." The drain half
+# shipped in TestDrainEvolveRequests. This slice ships the FSM-transition
+# half — but ONLY the deterministic transitions (ACTIVE→STAGNANT). The
+# other transitions (STAGNANT→ACTIVE reactivation, ACTIVE→COMPLETED on
+# success_criterion-met) require natural-language signal interpretation
+# and stay in LLM territory.
+#
+# Stagnation is pure arithmetic: runs since last_useful_iter >=
+# stagnation_threshold → STAGNANT. Extracting this to a pure-script
+# subcommand means the SKILL.md Mode: evolve step doesn't have to
+# eyeball stats and threshold math — it just iterates the plan lines.
+
+class TestFsmPlan:
+    """Pin the contract of `orchestrator.py fsm-plan`.
+
+    Output shape mirrors `drain-evolve-requests`: warnings on stdout
+    as `# warn:` lines, one JSON object per transition. `--apply` is
+    intentionally NOT added in this slice — applying the transition
+    means rewriting config.yaml's `routines[].state`, which is the
+    next atomic concern. This subcommand is read-only."""
+
+    def _write_config(self, tmp_path, routines, meta=None):
+        """Write a minimal v4 config and return the path. Uses the
+        full _v4_config shape so the orchestrator's loader doesn't
+        choke on missing top-level keys it later cares about."""
+        import yaml
+        cfg = _v4_config(routines)
+        if meta is not None:
+            cfg["meta"].update(meta)
+        p = tmp_path / "config.yaml"
+        p.write_text(yaml.safe_dump(cfg))
+        return p
+
+    def _routine(self, **overrides):
+        """A canonical ACTIVE routine with stats. Override any field.
+        Default values picked so the routine is JUST short of stagnant
+        (runs=5, threshold=7) — tests bump runs above threshold to
+        trigger a transition. Cheaper than rebuilding from scratch
+        in every test."""
+        base = {
+            "id": "pr-ci-watcher",
+            "state": "ACTIVE",
+            "primitive": "scheduled",
+            "trigger": {"cron": "*/30 * * * *", "human": "every 30 min"},
+            "purpose": "test",
+            "automation_level": "auto",
+            "execution_surface": "local",
+            "est_minutes": 5,
+            "stagnation_threshold": 7,
+            "stats": {
+                "runs": 5,
+                "useful": 0,
+                "noisy": 5,
+                "last_useful_iter": None,
+            },
+        }
+        # Stats overrides merge into stats dict, not replace it.
+        if "stats" in overrides:
+            base["stats"] = {**base["stats"], **overrides.pop("stats")}
+        base.update(overrides)
+        return base
+
+    def _read_plan_lines(self, text):
+        out_lines = []
+        for ln in text.splitlines():
+            s = ln.strip()
+            if not s or s.startswith("#"):
+                continue
+            out_lines.append(json.loads(s))
+        return out_lines
+
+    # ---- core arithmetic --------------------------------------------------
+
+    def test_runs_above_threshold_emits_stagnant_transition(self, orch, tmp_path):
+        """The canonical case: an ACTIVE routine has run more than
+        `stagnation_threshold` times without producing a useful
+        outcome (last_useful_iter is null) → transition to STAGNANT.
+
+        This is the WHOLE reason this subcommand exists. If this
+        test passes, the SKILL.md Mode: evolve step can iterate
+        plan lines instead of doing stats arithmetic in prose."""
+        cfg = self._write_config(
+            tmp_path,
+            [self._routine(stats={"runs": 10, "last_useful_iter": None})],
+        )
+        out = io.StringIO()
+        rc = orch.cli_main(["fsm-plan", "--config", str(cfg)], stdout=out)
+        assert rc == 0, out.getvalue()
+        plan = self._read_plan_lines(out.getvalue())
+        assert len(plan) == 1
+        entry = plan[0]
+        assert entry["routine_id"] == "pr-ci-watcher"
+        assert entry["from"] == "ACTIVE"
+        assert entry["to"] == "STAGNANT"
+
+    def test_runs_below_threshold_emits_no_transition(self, orch, tmp_path):
+        """The complementary case. Routine has run, but not enough
+        times to be stagnant yet. A transition here would be a
+        false-positive that paused a working routine — pin the
+        non-trigger condition."""
+        cfg = self._write_config(
+            tmp_path,
+            [self._routine(stats={"runs": 3, "last_useful_iter": None})],
+        )
+        out = io.StringIO()
+        rc = orch.cli_main(["fsm-plan", "--config", str(cfg)], stdout=out)
+        assert rc == 0
+        assert self._read_plan_lines(out.getvalue()) == []
+
+    def test_runs_equal_to_threshold_emits_transition(self, orch, tmp_path):
+        """Boundary: runs == threshold. The schema says 'consecutive
+        runs with stats.useful flat → STAGNANT' — once we've hit the
+        threshold-th unuseful run, that IS stagnation. Pinning the
+        boundary so a future off-by-one doesn't silently flip
+        behavior. (Inclusive boundary: `>=`, not `>`.)"""
+        cfg = self._write_config(
+            tmp_path,
+            [self._routine(
+                stagnation_threshold=7,
+                stats={"runs": 7, "last_useful_iter": None},
+            )],
+        )
+        out = io.StringIO()
+        rc = orch.cli_main(["fsm-plan", "--config", str(cfg)], stdout=out)
+        assert rc == 0
+        plan = self._read_plan_lines(out.getvalue())
+        assert len(plan) == 1, (
+            "runs == threshold must trigger STAGNANT (inclusive boundary). "
+            "If this fails, the comparison is `>` not `>=` — the routine "
+            "would have to run threshold+1 times before pausing, which "
+            "drifts past the configured patience."
+        )
+
+    def test_last_useful_iter_subtracted_when_set(self, orch, tmp_path):
+        """If `last_useful_iter` is set, only count runs SINCE that
+        iteration toward stagnation. Otherwise a long-running routine
+        that produced useful work last week would be marked stagnant
+        on its 8th run total — a false positive."""
+        cfg = self._write_config(
+            tmp_path,
+            [self._routine(
+                stagnation_threshold=7,
+                stats={"runs": 100, "useful": 50, "last_useful_iter": 95},
+            )],
+        )
+        out = io.StringIO()
+        rc = orch.cli_main(["fsm-plan", "--config", str(cfg)], stdout=out)
+        assert rc == 0
+        # 100 - 95 = 5 runs since last useful; threshold=7; NOT stagnant.
+        assert self._read_plan_lines(out.getvalue()) == [], (
+            "runs (100) - last_useful_iter (95) = 5 < threshold (7); "
+            "must NOT mark stagnant — the routine produced useful work "
+            "recently. False positive here would pause an active "
+            "contributor."
+        )
+
+    def test_last_useful_iter_subtracted_past_threshold_emits_transition(self, orch, tmp_path):
+        """Counterpart: same shape, but the gap since last_useful_iter
+        crosses the threshold. Must emit a STAGNANT plan line."""
+        cfg = self._write_config(
+            tmp_path,
+            [self._routine(
+                stagnation_threshold=7,
+                stats={"runs": 100, "useful": 1, "last_useful_iter": 50},
+            )],
+        )
+        out = io.StringIO()
+        rc = orch.cli_main(["fsm-plan", "--config", str(cfg)], stdout=out)
+        assert rc == 0
+        plan = self._read_plan_lines(out.getvalue())
+        assert len(plan) == 1
+        assert plan[0]["to"] == "STAGNANT"
+
+    # ---- threshold resolution --------------------------------------------
+
+    def test_per_routine_threshold_overrides_meta_default(self, orch, tmp_path):
+        """Per-routine `stagnation_threshold` always wins over
+        `meta.default_stagnation_threshold`. Without this precedence
+        a user-configured short-patience routine would be ignored in
+        favor of the cluster-wide default."""
+        cfg = self._write_config(
+            tmp_path,
+            [self._routine(
+                stagnation_threshold=3,  # short-patience override
+                stats={"runs": 4, "last_useful_iter": None},
+            )],
+            meta={"default_stagnation_threshold": 100},  # very patient cluster default
+        )
+        out = io.StringIO()
+        rc = orch.cli_main(["fsm-plan", "--config", str(cfg)], stdout=out)
+        assert rc == 0
+        plan = self._read_plan_lines(out.getvalue())
+        assert len(plan) == 1, (
+            "per-routine threshold (3) must win over meta default (100); "
+            "got no transition — the meta default is leaking through"
+        )
+
+    def test_meta_default_used_when_per_routine_unset(self, orch, tmp_path):
+        """When a routine omits `stagnation_threshold`, the meta
+        default applies. A fresh interview-driven install only sets
+        the meta default; pin that fallback path."""
+        r = self._routine(stats={"runs": 4, "last_useful_iter": None})
+        r.pop("stagnation_threshold")  # rely on meta default
+        cfg = self._write_config(
+            tmp_path,
+            [r],
+            meta={"default_stagnation_threshold": 3},
+        )
+        out = io.StringIO()
+        rc = orch.cli_main(["fsm-plan", "--config", str(cfg)], stdout=out)
+        assert rc == 0
+        plan = self._read_plan_lines(out.getvalue())
+        assert len(plan) == 1, (
+            "no per-routine threshold → must fall back to "
+            "meta.default_stagnation_threshold (3); 4 >= 3 should fire."
+        )
+
+    # ---- state filtering --------------------------------------------------
+
+    def test_non_active_routines_are_skipped(self, orch, tmp_path):
+        """Only ACTIVE routines are candidates for ACTIVE→STAGNANT.
+        Every other state is either already-paused (STAGNANT,
+        COMPLETED, STOPPED), transient/owned by a different transition
+        (EVOLVING), or pre-confirm (PROPOSED). Re-marking any of them
+        as stagnant would be either no-op (STAGNANT) or wrong."""
+        states_that_should_be_skipped = [
+            "PROPOSED", "EVOLVING", "STAGNANT", "COMPLETED", "STOPPED",
+        ]
+        routines = []
+        for i, st in enumerate(states_that_should_be_skipped):
+            r = self._routine(
+                id=f"skip-{i}",
+                state=st,
+                stagnation_threshold=1,  # would trigger if state weren't filtered
+                stats={"runs": 99, "last_useful_iter": None},
+            )
+            # Manual id override since _routine doesn't accept it via kwarg
+            # patten (override path) — set explicitly after.
+            r["id"] = f"skip-{i}"
+            routines.append(r)
+        cfg = self._write_config(tmp_path, routines)
+        out = io.StringIO()
+        rc = orch.cli_main(["fsm-plan", "--config", str(cfg)], stdout=out)
+        assert rc == 0
+        assert self._read_plan_lines(out.getvalue()) == [], (
+            "non-ACTIVE routines must be skipped regardless of stats; "
+            f"got plan lines for: "
+            f"{[p['routine_id'] for p in self._read_plan_lines(out.getvalue())]}"
+        )
+
+    # ---- output shape -----------------------------------------------------
+
+    def test_plan_line_carries_routine_id_from_to_and_reason(self, orch, tmp_path):
+        """Each plan line must be self-contained — routine_id, from
+        state, to state, and a human-readable reason. The reason
+        anchors the LLM step's eventual user-facing message ('we
+        paused pr-ci-watcher because...'). If reason is missing the
+        SKILL.md step has to re-derive it, defeating the point of
+        the deterministic emit."""
+        cfg = self._write_config(
+            tmp_path,
+            [self._routine(
+                stagnation_threshold=7,
+                stats={"runs": 12, "last_useful_iter": None},
+            )],
+        )
+        out = io.StringIO()
+        rc = orch.cli_main(["fsm-plan", "--config", str(cfg)], stdout=out)
+        assert rc == 0
+        plan = self._read_plan_lines(out.getvalue())
+        assert len(plan) == 1
+        entry = plan[0]
+        for k in ("routine_id", "from", "to", "reason"):
+            assert k in entry, f"plan line missing required field {k!r}"
+        assert isinstance(entry["reason"], str) and entry["reason"], (
+            "reason must be a non-empty string"
+        )
+
+    def test_empty_routines_emits_empty_plan(self, orch, tmp_path):
+        """A fresh install with zero routines must emit no plan lines
+        and exit 0. The SKILL.md step calls this unconditionally; a
+        non-zero exit here would surface as a spurious error."""
+        cfg = self._write_config(tmp_path, [])
+        out = io.StringIO()
+        rc = orch.cli_main(["fsm-plan", "--config", str(cfg)], stdout=out)
+        assert rc == 0
+        assert self._read_plan_lines(out.getvalue()) == []
+
+    # ---- robustness -------------------------------------------------------
+
+    def test_missing_stats_is_treated_as_zero_runs(self, orch, tmp_path):
+        """A freshly-installed routine has `stats: { runs: 0, ... }`,
+        but a hand-edited config may omit `stats` entirely. Treat
+        missing-or-empty stats as zero-runs — a brand new routine
+        can't be stagnant. The robust handling matters: an early
+        crash here would block every other routine's transition
+        check in the same fire."""
+        r = self._routine()
+        r.pop("stats")  # config without stats block at all
+        cfg = self._write_config(tmp_path, [r])
+        out = io.StringIO()
+        rc = orch.cli_main(["fsm-plan", "--config", str(cfg)], stdout=out)
+        assert rc == 0, (
+            f"missing stats must not crash the plan; got rc={rc}, "
+            f"out={out.getvalue()!r}"
+        )
+        assert self._read_plan_lines(out.getvalue()) == [], (
+            "routine with no stats yet → can't be stagnant"
+        )
+
+    def test_missing_config_returns_nonzero(self, orch, tmp_path):
+        """A missing config path is a user error, not a no-op. Unlike
+        drain-evolve-requests (where missing file = no requests yet),
+        fsm-plan without a config has no work it CAN do — surfacing
+        rc=1 lets the SKILL.md step abort cleanly."""
+        missing = tmp_path / "does-not-exist.yaml"
+        out = io.StringIO()
+        err = io.StringIO()
+        rc = orch.cli_main(
+            ["fsm-plan", "--config", str(missing)],
+            stdout=out,
+            stderr=err,
+        )
+        assert rc != 0, "missing config must surface as non-zero exit"
