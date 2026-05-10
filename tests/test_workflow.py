@@ -103,6 +103,54 @@ class TestTriggers:
         assert "issues" in on
 
 
+class TestChangedFilesForwarded:
+    """PRD #10 priority rule 4: when goal.md changes in the triggering
+    commit, only meta-evolve should fire — not the catch-up commit-tests
+    / commit-lint routines. The orchestrator's match_trigger() supports
+    this via `path_filters`, gated on a `--changed-files` CLI flag.
+
+    The workflow has to compute the diff and forward it. Without this,
+    the priority rule fires path_filters dead from GHA — match_trigger
+    falls back to "return all git-hook routines" and the catch-up
+    routines steal the slot from meta-evolve.
+
+    These pins ensure:
+      1. The workflow computes the changed-file list using git diff
+         (so push & merged-PR events both produce a diff list).
+      2. The orchestrator step passes `--changed-files` along with
+         the trigger type.
+
+    Loose substring matches because the exact shell shape can vary
+    (`git diff --name-only`, `git diff-tree`, etc.) but the intent
+    must be visibly present.
+    """
+
+    def test_workflow_computes_changed_files_for_git_hook_triggers(self, wf_text):
+        """Some step must produce a list of repo-relative paths that
+        changed in the triggering commit. We grep for either the typical
+        plumbing command or a pin on the orchestrator flag — the latter
+        proves the data path actually flows to where it matters."""
+        has_diff_call = (
+            "git diff --name-only" in wf_text
+            or "git diff-tree --name-only" in wf_text
+        )
+        assert has_diff_call, (
+            "workflow must compute a changed-file list via "
+            "`git diff --name-only` (or equivalent) so the orchestrator's "
+            "path_filters short-circuit (PRD #10 rule 4) actually reaches "
+            "production triggers"
+        )
+
+    def test_orchestrator_tick_step_passes_changed_files_flag(self, wf_text):
+        """The flag must show up in the orchestrator tick invocation —
+        otherwise the diff is computed but discarded."""
+        assert "--changed-files" in wf_text, (
+            "workflow computes the changed-file list but never passes it "
+            "to orchestrator.py — `--changed-files` flag missing from "
+            "the orchestrator tick invocation"
+        )
+
+
 class TestPullRequestMergeGate:
     """PRD #10 user story 8 + dispatch priority rule 2: PR-MERGE events
     fire commit-tests on the merged commit. Not every PR close is a merge —

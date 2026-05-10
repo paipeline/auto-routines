@@ -169,6 +169,49 @@ jobs:
               ;;
           esac
 
+      # PRD #10 priority rule 4: routines may declare `path_filters`
+      # (e.g. meta-evolve subscribes to `.iteration/goal.md`). When the
+      # changed-file set matches a filter, match_trigger() returns ONLY
+      # the matching routine — the catch-up commit-tests/commit-lint sit
+      # this tick out. To make that work from GHA we need the diff.
+      #
+      # We compute the file list in shell here (rather than in the
+      # orchestrator) so the workflow stays the single source of truth
+      # for "what GH event we're handling" — orchestrator.py is a pure
+      # function of its CLI args.
+      #
+      # Only emit the list for git-hook triggers; for cron / hook /
+      # manual triggers there's no commit to diff against.
+      - name: Determine changed files
+        id: changed
+        if: steps.trigger.outputs.type == 'git-hook'
+        run: |
+          set -euo pipefail
+          # `git diff HEAD~1 HEAD --name-only` works for:
+          #   - push to main (HEAD = pushed commit, HEAD~1 = previous tip)
+          #   - pull_request closed+merged (HEAD = merge commit on merge ref,
+          #     HEAD~1 = main pre-merge)
+          # fetch-depth: 50 (above) is enough history for the typical case.
+          # Issues events get an empty list — the orchestrator's git-hook
+          # path treats missing/empty changed_files as legacy fan-out.
+          if [ "${{ github.event_name }}" = "issues" ]; then
+            echo "Issue event — no diff to compute"
+            FILES=""
+          else
+            FILES=$(git diff --name-only HEAD~1 HEAD || true)
+          fi
+          # Forward via $GITHUB_OUTPUT using a heredoc so newline-separated
+          # paths survive intact. The orchestrator CLI accepts comma- OR
+          # newline-separated values.
+          {
+            echo 'files<<EOF'
+            printf '%s' "$FILES"
+            echo
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+          echo "Changed files for this tick:"
+          printf '%s\n' "$FILES"
+
       - name: Run orchestrator tick
         id: tick
         # Short-circuit when the trigger step decided there's nothing to
@@ -187,6 +230,12 @@ jobs:
           fi
           if [ -n "${{ steps.trigger.outputs.routine_ids }}" ]; then
             ARGS+=(--routine-ids "${{ steps.trigger.outputs.routine_ids }}")
+          fi
+          # PRD #10 rule 4: forward the diff so path_filters short-circuit
+          # works from GHA. Empty list = legacy fan-out (every git-hook
+          # routine fires) so this is safe to always pass when set.
+          if [ -n "${{ steps.changed.outputs.files }}" ]; then
+            ARGS+=(--changed-files "${{ steps.changed.outputs.files }}")
           fi
           python scripts/orchestrator.py "${ARGS[@]}" > /tmp/decisions.json
           echo "Decisions:"
