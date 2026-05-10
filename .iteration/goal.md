@@ -30,10 +30,23 @@ broken installs, or routines that drift back to "analyze only."
       TestErrorHandling, TestAtomicWrite, TestInstallStep6cInvokesRenderWrapper).
       SKILL.md install step 6c now invokes the wrapper directly (no
       LLM-render fallback) — drift detector pinned in the new test
-      class. The full `init`-against-tmp-repo integration test
-      (post-commit hook, config sanity, full install flow) remains a
-      separate slice — needs a tmp-repo fixture + Claude harness for
-      the LLM-driven interview steps.
+      class. The **audit half** shipped as
+      `scripts/orchestrator.py install-doctor` — the deterministic
+      core of the PRD's "init integration test" acceptance criteria.
+      Audits a repo for: `.iteration/config.yaml` (exists + parses),
+      `.claude/skills/_shared/preamble.md` (exists), per-routine
+      `.claude/skills/<id>/SKILL.md` (exists + no `{{...}}` leftover),
+      `.git/hooks/post-commit` (exists + executable when a git-hook
+      routine is present, n/a otherwise). Emits JSONL on stdout, one
+      record per check; exit 0 iff every check passes. Pinned by
+      `tests/test_install_doctor.py` (13 invariants across
+      TestFullInstallPasses, TestMissingArtifacts, TestPlaceholderLeak,
+      TestPostCommitHook, TestOutputShape). The full
+      `init`-against-tmp-repo integration test that actually runs the
+      interview-driven install via Claude remains a separate slice —
+      it will compose this audit with a tmp-repo fixture + Claude
+      harness, but the assertion logic is now in place and testable
+      on its own.
 - [~] Add tests for the `evolve` flow — drain `evolve_requests.jsonl`, perform
       the FSM transitions, write a checkpoint, apply, verify.
       Partial: (a) drain half shipped as `scripts/orchestrator.py drain-evolve-requests`

@@ -404,6 +404,7 @@ def tick(
 import argparse  # noqa: E402  (intentional: keep CLI deps off the import path
 import json      # noqa: E402   for callers that just want pure functions)
 import os        # noqa: E402
+import stat      # noqa: E402  (used by install-doctor for hook exec-bit check)
 import pathlib   # noqa: E402
 import sys       # noqa: E402
 import tempfile  # noqa: E402
@@ -797,6 +798,29 @@ def _make_parser() -> argparse.ArgumentParser:
             "Optional explicit ISO-8601 timestamp for the description "
             "line. If omitted, uses local-now with offset (never UTC "
             "`Z` — SKILL.md is explicit about local-machine readability)."
+        ),
+    )
+
+    id_p = sub.add_parser(
+        "install-doctor",
+        help="Audit a repo for a healthy auto-routines install.",
+        description=(
+            "Walk the filesystem of a repo and verify every artifact "
+            "that auto-routines's install procedure is supposed to "
+            "land. Emits one JSON line per check on stdout. Exit 0 "
+            "when every check passes, exit 1 otherwise. The "
+            "deterministic core of the PRD's 'init integration test' "
+            "acceptance criteria — usable on its own as "
+            "`/auto-routines doctor`, and re-used by the future full "
+            "integration test for its assertion half."
+        ),
+    )
+    id_p.add_argument(
+        "--repo-root", required=True,
+        help=(
+            "Path to the repo root to audit. Required — never default "
+            "to cwd (auditing the wrong repo by accident is worse "
+            "than a noisy argparse error)."
         ),
     )
     return p
@@ -1623,6 +1647,175 @@ def _cli_render_routine_skill(args, out, err) -> int:
     return 0
 
 
+# Routine primitives that require a working .git/hooks/post-commit
+# dispatch entry. Adding a new primitive that fires on commit means
+# adding it here AND updating templates/post-commit-hook.sh.
+_POST_COMMIT_PRIMITIVES = frozenset({"git-hook"})
+
+
+def _emit_check(out, name: str, ok: bool, detail: str) -> None:
+    """Emit one install-doctor check record as a single JSON line.
+    Centralized so the shape is impossible to drift across the various
+    check functions."""
+    json.dump(
+        {"check": name, "ok": bool(ok), "detail": detail},
+        out,
+        sort_keys=True,
+    )
+    out.write("\n")
+
+
+def _cli_install_doctor(args, out, err) -> int:
+    """Audit a repo for a healthy auto-routines install.
+
+    The checks performed (each emits one JSON line):
+    - `config-yaml`: `.iteration/config.yaml` exists and parses.
+    - `preamble`: `.claude/skills/_shared/preamble.md` exists (the
+       shared contract every routine SKILL.md references).
+    - `routine-skill:<id>` (one per routine): the rendered SKILL.md
+       exists and contains no `{{...}}` placeholders.
+    - `post-commit-hook`: if any routine has `primitive: git-hook`,
+       `.git/hooks/post-commit` must exist AND be executable. If no
+       git-hook routine exists, this check is `ok=true, detail='n/a'`
+       (auditing transparency — caller sees the check happened).
+
+    Exit 0 if every check is `ok`; exit 1 otherwise. The output
+    contract is JSONL, one record per check — callers (the future
+    `/auto-routines doctor` slash command, the dashboard, the full
+    integration test) parse and report from it.
+    """
+    repo_root = pathlib.Path(args.repo_root)
+    failures = 0
+
+    # --- config-yaml check -------------------------------------------------
+    config_path = repo_root / ".iteration" / "config.yaml"
+    config_data: dict | None = None
+    if not config_path.exists():
+        _emit_check(
+            out, "config-yaml", False,
+            f".iteration/config.yaml not found at {config_path}. "
+            f"Without config, no routine layout is known — re-run "
+            f"`/auto-routines init`.",
+        )
+        failures += 1
+    else:
+        try:
+            config_data = _load_yaml(str(config_path))
+            _emit_check(
+                out, "config-yaml", True,
+                f".iteration/config.yaml parses ({len(config_data.get('routines', []) or [])} routines)",
+            )
+        except Exception as e:
+            _emit_check(
+                out, "config-yaml", False,
+                f".iteration/config.yaml exists but does not parse "
+                f"as YAML: {e}",
+            )
+            failures += 1
+            config_data = None
+
+    # --- preamble check ----------------------------------------------------
+    preamble_path = repo_root / ".claude" / "skills" / "_shared" / "preamble.md"
+    if not preamble_path.exists():
+        _emit_check(
+            out, "preamble", False,
+            f"shared preamble missing at {preamble_path}. Every routine "
+            f"SKILL.md's `## Reference` section points at this file; "
+            f"without it, routines fire with no shared rules. SKILL.md "
+            f"step 6f renders it from templates/routine-preamble.md.",
+        )
+        failures += 1
+    else:
+        _emit_check(
+            out, "preamble", True,
+            f"shared preamble present ({preamble_path.stat().st_size} bytes)",
+        )
+
+    # --- per-routine SKILL.md checks --------------------------------------
+    routines = (config_data or {}).get("routines", []) or []
+    for routine in routines:
+        rid = routine.get("id")
+        if not rid:
+            # Defensive — a config with no-id routines would already
+            # fail sanity-check, but we don't want to crash here.
+            continue
+        skill_path = repo_root / ".claude" / "skills" / rid / "SKILL.md"
+        check_name = f"routine-skill:{rid}"
+        if not skill_path.exists():
+            _emit_check(
+                out, check_name, False,
+                f"per-routine SKILL.md missing at {skill_path}. The "
+                f"slash command `/{rid}` won't resolve without it. "
+                f"Re-render via `scripts/orchestrator.py "
+                f"render-routine-skill --routine {rid} ...`.",
+            )
+            failures += 1
+            continue
+        text = skill_path.read_text(encoding="utf-8")
+        leftover = _PLACEHOLDER_RE.findall(text)
+        if leftover:
+            unique = sorted(set(leftover))
+            _emit_check(
+                out, check_name, False,
+                f"per-routine SKILL.md at {skill_path} contains "
+                f"unsubstituted placeholder(s): {unique}. The render "
+                f"wrapper should have refused to write this — "
+                f"investigate how it got past PR #57's check.",
+            )
+            failures += 1
+        else:
+            _emit_check(
+                out, check_name, True,
+                f"rendered cleanly ({len(text)} bytes, no placeholders)",
+            )
+
+    # --- post-commit hook check (only when a git-hook routine exists) -----
+    needs_post_commit = any(
+        r.get("primitive") in _POST_COMMIT_PRIMITIVES for r in routines
+    )
+    post_commit_path = repo_root / ".git" / "hooks" / "post-commit"
+    if not needs_post_commit:
+        _emit_check(
+            out, "post-commit-hook", True,
+            "n/a — no git-hook routine in config; post-commit "
+            "dispatch is not required for this install.",
+        )
+    elif not post_commit_path.exists():
+        _emit_check(
+            out, "post-commit-hook", False,
+            f".git/hooks/post-commit missing at {post_commit_path}. "
+            f"A git-hook routine in config will never fire — git "
+            f"silently skips a non-existent hook. Re-render via "
+            f"templates/post-commit-hook.sh (SKILL.md step 6c, "
+            f"git-hook primitive branch).",
+        )
+        failures += 1
+    else:
+        # The hook MUST be executable. Git's behavior on a
+        # non-executable hook is to silently skip it — worse than
+        # a missing one, because the user sees the file and assumes
+        # it works.
+        mode = post_commit_path.stat().st_mode
+        is_exec = bool(mode & stat.S_IXUSR) or bool(mode & stat.S_IXGRP) or bool(mode & stat.S_IXOTH)
+        if not is_exec:
+            _emit_check(
+                out, "post-commit-hook", False,
+                f".git/hooks/post-commit exists at {post_commit_path} "
+                f"but is not executable (mode {oct(mode & 0o777)}). "
+                f"Git will silently skip it — `chmod +x` the file or "
+                f"re-render via the install procedure.",
+            )
+            failures += 1
+        else:
+            _emit_check(
+                out, "post-commit-hook", True,
+                f"executable hook present at {post_commit_path} "
+                f"(mode {oct(mode & 0o777)})",
+            )
+
+    return 1 if failures else 0
+
+
 def _cli_test_fire(args, out, err) -> int:
     """Manual one-shot dispatch plan for `/auto-routines test-fire <id>`.
 
@@ -1729,6 +1922,9 @@ def cli_main(
 
     if args.command == "render-routine-skill":
         return _cli_render_routine_skill(args, out, err)
+
+    if args.command == "install-doctor":
+        return _cli_install_doctor(args, out, err)
 
     if args.command != "tick":
         print(f"unknown command: {args.command}", file=err)
