@@ -322,3 +322,74 @@ class TestInstallStep6aCopiesStatusScript:
             "step 6a must clarify scripts/status.py lands relative to "
             "repo root, not inside .iteration/"
         )
+
+
+# ---------------------------------------------------------------------------
+# Skill UX: /auto-routines test-fire <routine_id> slash-command wrapper
+# ---------------------------------------------------------------------------
+# PRD `.iteration/goal.md` (Skill UX block) flagged `/auto-routines
+# test-fire <routine_id>` as a missing operator-facing command. The
+# orchestrator CLI already has the subcommand (PR #35), but SKILL.md
+# never wired it to a Mode. Without a Mode entry, invoking
+# `/auto-routines test-fire <id>` falls through to a generic LLM
+# response — and the user pays Claude tokens for what should be a
+# pure-script dispatch-plan print, exactly like Mode: status.
+
+class TestModeTestFire:
+    def test_modes_table_lists_test_fire(self, skill_text):
+        """The Modes table at the top of SKILL.md is the operator's
+        entry index. Without a row here, `test-fire` is undiscoverable
+        and falls through to `init`/`status` heuristics."""
+        # Find the Modes table.
+        modes_start = skill_text.find("## Modes")
+        guardrails_start = skill_text.find("## Guardrails")
+        assert modes_start != -1 and guardrails_start != -1
+        modes_table = skill_text[modes_start:guardrails_start]
+        assert "test-fire" in modes_table, (
+            "Modes table must list test-fire so the operator sees it "
+            "as a first-class mode, not an undocumented escape hatch"
+        )
+
+    def test_mode_test_fire_section_exists(self, skill_text):
+        """A dedicated `## Mode: test-fire <routine_id>` section must
+        document the command. Without it, the slash-command wrapper
+        has no behavior pinned and drifts toward an LLM render."""
+        assert (
+            "## Mode: `test-fire" in skill_text
+            or "## Mode: `test-fire <routine_id>`" in skill_text
+        ), "SKILL.md needs an explicit Mode: test-fire section"
+
+    def test_mode_test_fire_is_pure_script(self, skill_text):
+        """Same contract as Mode: status — no LLM, just shell out to
+        `scripts/orchestrator.py test-fire`. The whole point is
+        debugging without burning tokens or waiting for cron."""
+        mode_start = skill_text.find("## Mode: `test-fire")
+        if mode_start == -1:
+            # Section missing — handled by the previous test; bail
+            # out cleanly so the failure is attributable.
+            return
+        # Slice to the next top-level Mode section or end of file.
+        rest = skill_text[mode_start + 1:]
+        next_mode = rest.find("\n## Mode")
+        next_section = rest.find("\n## ")
+        ends = [e for e in (next_mode, next_section) if e != -1]
+        section_end = min(ends) if ends else len(rest)
+        section = skill_text[mode_start : mode_start + 1 + section_end]
+        # Pin the no-LLM contract and the actual command shape.
+        section_lower = section.lower()
+        assert (
+            "does not spawn" in section_lower
+            or "no llm" in section_lower
+            or "no claude tokens" in section_lower
+            or "pure-script" in section_lower
+            or "pure script" in section_lower
+        ), "Mode: test-fire must declare it's a no-LLM pure-script mode"
+        assert "scripts/orchestrator.py" in section, (
+            "Mode: test-fire must invoke scripts/orchestrator.py "
+            "test-fire (the existing CLI subcommand from PR #35)"
+        )
+        assert "test-fire" in section
+        assert "--routine-id" in section or "<routine_id>" in section, (
+            "Mode: test-fire must show the routine-id argument so the "
+            "operator knows what to pass"
+        )

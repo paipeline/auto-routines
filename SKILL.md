@@ -56,6 +56,7 @@ Detect mode from the user's invocation:
 | `stop <routine_id>`                        | `stop`  | Transition `ACTIVE → STOPPED`. Neutralize the underlying task.            |
 | `start <routine_id>`                       | `start` | Transition `STAGNANT|COMPLETED|STOPPED → ACTIVE`. Re-arm the task.        |
 | `revert <iter-NNN>`                        | `revert`| `git revert` back to the named checkpoint. Reconcile tasks afterwards.    |
+| `test-fire <routine_id>`                   | `test-fire` | Print the dispatch plan for one routine. Pure-script, no LLM tokens.  |
 
 ## Guardrails (apply to every mode)
 
@@ -435,6 +436,32 @@ python3 scripts/status.py --json     # machine-readable
 The script reads `.iteration/config.yaml` + `.iteration/log.jsonl` + `.iteration/evolve_requests.jsonl` and renders the same status block format documented under "Status display". No file analysis, no synthesis, no Claude tokens.
 
 Install copies `scripts/status.py` from the skill directory into the consumer repo (step 6a). Tests in `tests/test_status.py` pin the no-LLM contract: any change that introduces `subprocess`, network calls, or LLM invocation breaks the test suite.
+
+## Mode: `test-fire <routine_id>`
+
+**This mode does not spawn an LLM.** It prints the dispatch plan one
+routine would receive at its next cron fire — same shape the post-commit
+hook uses — without actually invoking Claude. Useful for debugging a
+routine's wiring (cron, primitive, state, prompt) without waiting for
+the schedule or paying Claude tokens.
+
+```bash
+python3 scripts/orchestrator.py test-fire \
+    --config .iteration/config.yaml \
+    --routine-id <routine_id>
+```
+
+The orchestrator reads the routine from `.iteration/config.yaml`, checks
+its `state` (warns to stderr if STOPPED but still emits the plan to
+stdout so the output stays pipeable), and prints the plan as a series
+of `#`-prefixed comment lines followed by the literal command. Exit
+code is `0` on success, non-zero on unknown `routine_id` (error to
+stderr, plan suppressed).
+
+No file analysis, no synthesis, no Claude tokens. Tests in
+`tests/test_orchestrator_cli.py::TestTestFire` pin the read-only
+contract: any change that mutates `.iteration/state.json` or
+`.iteration/log.jsonl` from the `test-fire` path breaks the suite.
 
 ## Mode: `stop <routine_id>`
 
