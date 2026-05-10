@@ -106,6 +106,30 @@ routines:
       noisy: 0
       last_useful_iter: null
 
+  - id: meta-evolve
+    state: ACTIVE
+    enabled: true
+    primitive: git-hook
+    est_minutes: 5
+    trigger:
+      human: "on every commit that touches .iteration/goal.md"
+    path_filters:
+      - .iteration/goal.md
+    purpose: "When .iteration/goal.md changes, re-plan the iteration's task list and commit the new breakdown."
+    success_criterion: "tasks.md regenerated within 1 fire of every goal.md edit"
+    stagnation_threshold: 5
+    self_evolve: false
+    automation_level: auto
+    prompt_skill: meta-evolve
+    iter_added: 1
+    task_id: ""
+    last_outcome_summary: ""
+    stats:
+      runs: 0
+      useful: 0
+      noisy: 0
+      last_useful_iter: null
+
   - id: daily-digest
     state: ACTIVE
     enabled: true

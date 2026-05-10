@@ -60,6 +60,15 @@ ROUTINE_SPECIFIC_INPUTS = {
         "- `gh pr list --state all --search \"updated:>$(date -u -v-1d +%Y-%m-%dT%H:%M:%SZ)\"`\n"
         "- Tail of `.iteration/log.jsonl` since 00:00 today."
     ),
+    "meta-evolve": (
+        "- `.iteration/goal.md` (the just-edited PRD — required; this is what changed).\n"
+        "- `git show HEAD -- .iteration/goal.md` to see exactly which lines moved.\n"
+        "- `.iteration/tasks.md` (the cached task breakdown you'll rewrite — "
+        "may not exist on first fire; create it then).\n"
+        "- `gh pr list --state open --search 'head:routines/prd-implement'` "
+        "(in-flight prd-implement PRs to preserve — do NOT rip out tasks "
+        "that already have an open PR)."
+    ),
 }
 
 SELF_EVOLVE_ON = """\
