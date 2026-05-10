@@ -372,3 +372,169 @@ def sync_dashboard(
         "issue_url": url,
         "issue_number": number,
     }
+
+
+# ---------------------------------------------------------------------------
+# CLI shim — composed by GHA workflow after orchestrator.py tick writes
+# the fresh state. Renders the dashboard from disk and pushes it.
+# ---------------------------------------------------------------------------
+
+import argparse  # noqa: E402
+import os        # noqa: E402
+import sys       # noqa: E402
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError  # noqa: E402
+
+
+def _parse_now(s: str) -> dt.datetime:
+    """Same parser as orchestrator.cli_main._parse_now — duplicated to keep
+    each script's CLI standalone (no cross-module CLI imports)."""
+    if s.endswith("Z"):
+        raise ValueError(
+            f"--now must use ±HHMM offset (got {s!r}); UTC `Z` is banned"
+        )
+    if len(s) >= 5 and s[-5] in ("+", "-") and s[-3] != ":":
+        s_norm = s[:-2] + ":" + s[-2:]
+    else:
+        s_norm = s
+    parsed = dt.datetime.fromisoformat(s_norm)
+    if parsed.tzinfo is None:
+        raise ValueError(f"--now must include a tz offset (got {s!r})")
+    return parsed
+
+
+def _load_yaml(path: str) -> dict:
+    import yaml
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def _load_json(path: str) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _load_log_jsonl(path: str) -> list[dict]:
+    """Read .iteration/log.jsonl. Missing file is fine — returns []. Bad
+    lines are skipped (not fatal); the dashboard should never crash on a
+    malformed log entry."""
+    if not os.path.exists(path):
+        return []
+    entries: list[dict] = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return entries
+
+
+def _make_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="dashboard",
+        description="auto-routines dashboard — render + sync the living issue.",
+    )
+    sub = p.add_subparsers(dest="command", required=True)
+
+    sync_p = sub.add_parser(
+        "sync",
+        help="Render dashboard markdown and sync it to the GitHub issue.",
+        description=(
+            "Reads config + state + log, renders the dashboard body via "
+            "render_dashboard(), then syncs to the issue: creates if "
+            "missing, edits if differing, noop if unchanged."
+        ),
+    )
+    sync_p.add_argument("--config", required=True)
+    sync_p.add_argument("--state", required=True)
+    sync_p.add_argument("--log", required=True, help="Path to log.jsonl (missing OK)")
+    sync_p.add_argument("--repo", required=True, help="owner/name")
+    sync_p.add_argument("--iter", required=True, type=int, dest="iter_n")
+    sync_p.add_argument(
+        "--now",
+        help="Override clock for tests. ±HHMM offset required; UTC `Z` refused.",
+    )
+    return p
+
+
+def cli_main(
+    argv: list[str],
+    *,
+    stdout=None,
+    stderr=None,
+    gh_run: Callable[[list[str]], str] | None = None,
+) -> int:
+    """Entry point. Returns exit code; does not call sys.exit.
+
+    `gh_run` is injectable so tests pass a fake; production passes None
+    and we use default_gh_run."""
+    out = stdout if stdout is not None else sys.stdout
+    err = stderr if stderr is not None else sys.stderr
+
+    parser = _make_parser()
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as e:
+        return int(e.code) if e.code is not None else 2
+
+    if args.command != "sync":
+        print(f"unknown command: {args.command}", file=err)
+        return 2
+
+    if not args.repo:
+        print("--repo must be non-empty (owner/name)", file=err)
+        return 1
+
+    try:
+        config = _load_yaml(args.config)
+    except (OSError, Exception) as e:
+        print(f"config load failed: {e}", file=err)
+        return 1
+
+    try:
+        state = _load_json(args.state)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"state load failed: {e}", file=err)
+        return 1
+
+    meta = (config or {}).get("meta", {}) or {}
+    tz_name = meta.get("idle_window_tz") or "UTC"
+
+    try:
+        if args.now:
+            now = _parse_now(args.now)
+        else:
+            now = dt.datetime.now(tz=ZoneInfo(tz_name))
+    except (ValueError, ZoneInfoNotFoundError) as e:
+        print(f"--now invalid: {e}", file=err)
+        return 1
+
+    log_entries = _load_log_jsonl(args.log)
+
+    try:
+        body = render_dashboard(state, config, log_entries, now=now)
+    except ValueError as e:
+        print(f"render failed: {e}", file=err)
+        return 1
+
+    try:
+        result = sync_dashboard(
+            body, repo=args.repo, iter_n=args.iter_n, gh_run=gh_run,
+        )
+    except ValueError as e:
+        print(f"sync failed: {e}", file=err)
+        return 1
+    except Exception as e:  # subprocess.CalledProcessError, network, etc.
+        print(f"sync failed: {e}", file=err)
+        return 1
+
+    json.dump(result, out)
+    out.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(cli_main(sys.argv[1:]))
