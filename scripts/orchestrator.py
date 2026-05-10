@@ -757,6 +757,48 @@ def _make_parser() -> argparse.ArgumentParser:
             "literal `|` (would break the Markdown table)."
         ),
     )
+
+    rrs_p = sub.add_parser(
+        "render-routine-skill",
+        help="Render templates/routine-skill.md into .claude/skills/<id>/SKILL.md.",
+        description=(
+            "Pure-script placeholder substitution for per-routine "
+            "SKILL.md rendering (install step 6f). Pulls the routine "
+            "config from `--config`, the prompt_body from `--catalog`, "
+            "and the template from `--template`; writes the rendered "
+            "SKILL.md to `--out` atomically. Refuses if any `{{...}}` "
+            "placeholder remains unsubstituted — the PRD's `no "
+            "placeholders` install acceptance criterion made concrete."
+        ),
+    )
+    rrs_p.add_argument(
+        "--config", required=True,
+        help="Path to .iteration/config.yaml.",
+    )
+    rrs_p.add_argument(
+        "--catalog", required=True,
+        help="Path to templates/routine-catalog.yaml (source of prompt_body).",
+    )
+    rrs_p.add_argument(
+        "--template", required=True,
+        help="Path to templates/routine-skill.md.",
+    )
+    rrs_p.add_argument(
+        "--routine", required=True,
+        help="Routine id (must appear in config.yaml).",
+    )
+    rrs_p.add_argument(
+        "--out", required=True,
+        help="Destination path (typically .claude/skills/<id>/SKILL.md).",
+    )
+    rrs_p.add_argument(
+        "--installed-at", default=None,
+        help=(
+            "Optional explicit ISO-8601 timestamp for the description "
+            "line. If omitted, uses local-now with offset (never UTC "
+            "`Z` — SKILL.md is explicit about local-machine readability)."
+        ),
+    )
     return p
 
 
@@ -1355,6 +1397,232 @@ def _cli_checkpoint_append(args, out, err) -> int:
     return 0
 
 
+# `{{name}}` placeholder pattern. Matches the SKILL.md placeholder table
+# (line 712) exactly — alphanumeric + underscore only. Anything that
+# survives substitution against this pattern is a wrapper bug.
+_PLACEHOLDER_RE = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
+
+# The self-evolution snippet rendered when routine.self_evolve is true.
+# Single source of truth — the LLM previously rendered this from prose
+# in SKILL.md, getting subtly different wording per install. Pinning
+# it here makes installs byte-reproducible.
+_SELF_EVOLVE_BLOCK_TRUE = (
+    "If during a fire you conclude this routine's config is wrong "
+    "(stale, noisy, or misaligned with the current goal), append a "
+    "request to `.iteration/evolve_requests.jsonl` with one JSON "
+    "object per line:\n"
+    "\n"
+    "```json\n"
+    '{"ts": "<local-iso-with-offset>", "routine": "<your-routine-id>", '
+    '"kind": "config-change", "reason": "<one-line why>", '
+    '"proposal": "<one-line what>"}\n'
+    "```\n"
+    "\n"
+    "The meta-agent drains this on its next fire (see "
+    "`.claude/skills/_shared/preamble.md` for the canonical contract)."
+)
+
+_SELF_EVOLVE_BLOCK_FALSE = (
+    "Self-evolution is disabled for this routine "
+    "(`routine.self_evolve: false`). Do not attempt to mutate your "
+    "own config from inside a fire — the meta-agent will not process "
+    "requests from routines with self_evolve off."
+)
+
+
+def _cli_render_routine_skill(args, out, err) -> int:
+    """Deterministic placeholder substitution for per-routine SKILL.md.
+
+    The PRD requires installed SKILL.md files contain "no
+    `{{placeholders}}`". Previously this was a pure-LLM rendering
+    step (SKILL.md install step 6f) — and the LLM would fat-finger
+    placeholders (leftover `{{routine_id}}`, UTC `Z` instead of local
+    offset, prompt_body pulled from config instead of catalog).
+
+    This wrapper does the substitution mechanically:
+    - routine_id, purpose, primitive, iter_added: from config.yaml
+      routine entry
+    - prompt_body: from catalog.yaml archetype (config never has it —
+      would bloat the file)
+    - trigger_summary: from routine.trigger.human
+    - success_criterion: from routine.success_criterion with fallback
+      to `(none — runs indefinitely)`
+    - installed_at: --installed-at arg if given, else now() with local
+      offset (never `Z`)
+    - self_evolve_block: branches on routine.self_evolve
+    - routine_specific_inputs: empty string by default; catalog can
+      override via `routine_specific_inputs:` field
+
+    After substitution, any remaining `{{...}}` is a hard error — we
+    refuse to write a half-rendered file. Atomic write via tempfile +
+    os.replace, so a failed render leaves no partial file behind.
+    """
+    # Lazy imports — keeps the pure-function path import-free for
+    # callers that don't need rendering.
+    try:
+        cfg = _load_yaml(args.config)
+    except (OSError, Exception) as e:
+        print(f"config load failed: {e}", file=err)
+        return 1
+
+    routines = (cfg or {}).get("routines", []) or []
+    routine = next((r for r in routines if r.get("id") == args.routine), None)
+    if routine is None:
+        known = ", ".join(r.get("id", "?") for r in routines) or "(none)"
+        print(
+            f"unknown routine id: {args.routine!r} "
+            f"(known routines: {known})",
+            file=err,
+        )
+        return 1
+
+    try:
+        catalog = _load_yaml(args.catalog)
+    except (OSError, Exception) as e:
+        print(f"catalog load failed: {e}", file=err)
+        return 1
+
+    archetypes = (catalog or {}).get("archetypes", []) or []
+    # Archetype is keyed by routine.id — the contract is "config and
+    # catalog align by id". A `prompt_skill` field for aliasing was
+    # considered and dropped: in practice every config sets
+    # `prompt_skill: <same as id>`, so the alias adds no value and
+    # would let a typo silently route to the wrong archetype.
+    archetype_id = routine.get("id")
+    archetype = next(
+        (a for a in archetypes if a.get("id") == archetype_id), None
+    )
+    if archetype is None:
+        print(
+            f"no catalog archetype matches routine "
+            f"{args.routine!r} (looked for archetype id "
+            f"{archetype_id!r}). Cannot render: prompt_body has nowhere "
+            f"to come from.",
+            file=err,
+        )
+        return 1
+
+    prompt_body = archetype.get("prompt_body") or ""
+    if not prompt_body.strip():
+        print(
+            f"catalog archetype {archetype_id!r} has empty prompt_body — "
+            f"would render a SKILL.md with no `What to do` section. "
+            f"Refusing.",
+            file=err,
+        )
+        return 1
+
+    try:
+        template = pathlib.Path(args.template).read_text(encoding="utf-8")
+    except OSError as e:
+        print(f"template load failed: {e}", file=err)
+        return 1
+
+    # Build the substitution map. None values become empty strings —
+    # the unknown-placeholder check below catches anything we forgot.
+    success = routine.get("success_criterion") or ""
+    if not success.strip():
+        success = "(none — runs indefinitely)"
+
+    trigger = routine.get("trigger", {}) or {}
+    trigger_summary = trigger.get("human") or trigger.get("cron") or "(no trigger)"
+
+    if args.installed_at:
+        installed_at = args.installed_at
+    else:
+        # Local-now with offset. SKILL.md is explicit: never UTC `Z`.
+        installed_at = dt.datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
+
+    self_evolve = bool(routine.get("self_evolve", False))
+    self_evolve_block = (
+        _SELF_EVOLVE_BLOCK_TRUE if self_evolve else _SELF_EVOLVE_BLOCK_FALSE
+    )
+
+    # routine_specific_inputs: catalog may override with a curated bullet
+    # list (PR routines get `gh pr list`, CI routines get `gh run list`).
+    # Default to empty string when absent — the template's bullet list
+    # already includes the universal inputs above the placeholder.
+    routine_specific_inputs = archetype.get("routine_specific_inputs") or ""
+
+    substitutions = {
+        "routine_id": str(routine.get("id", "")),
+        "purpose": str(routine.get("purpose", "")),
+        "primitive": str(routine.get("primitive", "")),
+        "iter_added": str(routine.get("iter_added", "")),
+        "trigger_summary": str(trigger_summary),
+        "success_criterion": str(success),
+        "installed_at": str(installed_at),
+        "self_evolve_block": str(self_evolve_block),
+        "routine_specific_inputs": str(routine_specific_inputs),
+        "routine_prompt_body": str(prompt_body),
+    }
+
+    def _sub(m: "re.Match") -> str:
+        name = m.group(1)
+        if name not in substitutions:
+            # Don't substitute — leave the literal in place so the
+            # post-render check catches it and fails loudly. We collect
+            # unknown names below to surface them all at once.
+            return m.group(0)
+        return substitutions[name]
+
+    rendered = _PLACEHOLDER_RE.sub(_sub, template)
+
+    # Post-render check: any `{{...}}` left over means either the
+    # template has a placeholder we don't know about, or our
+    # substitution introduced one (it shouldn't — prompt_body is
+    # treated as a literal). Refuse loudly.
+    leftover = _PLACEHOLDER_RE.findall(rendered)
+    if leftover:
+        unique_names = sorted(set(leftover))
+        print(
+            f"render-routine-skill: refusing to write {args.out!r}; "
+            f"unknown placeholder(s) survived substitution: "
+            f"{unique_names}. Either the template references a variable "
+            f"the wrapper doesn't know how to fill, or the catalog's "
+            f"prompt_body contains literal `{{{{...}}}}` syntax (it "
+            f"shouldn't — only the template uses placeholders).",
+            file=err,
+        )
+        return 1
+
+    # Atomic write. Same-dir tempfile so os.replace is on the same
+    # filesystem (atomicity guarantee).
+    target = pathlib.Path(args.out)
+    parent = target.parent
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        print(f"could not create parent dir {parent}: {e}", file=err)
+        return 1
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            dir=str(parent),
+            prefix=".routine-skill.",
+            suffix=".tmp",
+            delete=False,
+            encoding="utf-8",
+        ) as tmp:
+            tmp.write(rendered)
+            tmp_path = tmp.name
+        os.replace(tmp_path, str(target))
+    except OSError as e:
+        print(f"could not write rendered SKILL.md to {target}: {e}", file=err)
+        return 1
+
+    # Summary line so callers (install flow) can log what got written
+    # without re-reading the file. Keep it short — the file itself is
+    # the artifact.
+    print(
+        f"rendered routine {args.routine!r} → {target} "
+        f"({len(rendered)} bytes, no placeholders remain)",
+        file=out,
+    )
+    return 0
+
+
 def _cli_test_fire(args, out, err) -> int:
     """Manual one-shot dispatch plan for `/auto-routines test-fire <id>`.
 
@@ -1458,6 +1726,9 @@ def cli_main(
 
     if args.command == "checkpoint-append":
         return _cli_checkpoint_append(args, out, err)
+
+    if args.command == "render-routine-skill":
+        return _cli_render_routine_skill(args, out, err)
 
     if args.command != "tick":
         print(f"unknown command: {args.command}", file=err)

@@ -12,11 +12,25 @@ broken installs, or routines that drift back to "analyze only."
 ## Concrete objectives (PRD)
 
 ### Coverage and correctness
-- [ ] Add an integration test that runs `init` against a fresh temp repo under
+- [~] Add an integration test that runs `init` against a fresh temp repo under
       `/tmp/auto-routines-test/` and asserts every artifact lands on disk
       (`.git/hooks/post-commit` exists & executable, `.claude/skills/<id>/SKILL.md`
       filled with no `{{placeholders}}`, `.iteration/config.yaml` passes
       sanity-check). Currently the test suite only covers the schema and catalog.
+      Partial: the "no `{{placeholders}}`" half shipped as
+      `scripts/orchestrator.py render-routine-skill` — deterministic
+      placeholder substitution (previously pure-LLM in SKILL.md install
+      step 6f). Looks up archetype by `routine.id` (config and catalog
+      align by id; `prompt_skill` aliasing dropped — typos shouldn't
+      silently route to the wrong archetype). Refuses to write if any
+      `{{...}}` survives substitution; atomic write so a failed render
+      leaves no partial file. Pinned by `tests/test_render_routine_skill.py`
+      (13 invariants across TestNoPlaceholdersAfterRender,
+      TestPlaceholderSources, TestInstalledAtTimestamp, TestSelfEvolveBlock,
+      TestErrorHandling, TestAtomicWrite). The full `init`-against-tmp-repo
+      integration test (post-commit hook, config sanity, full install
+      flow) remains a separate slice — needs a tmp-repo fixture + Claude
+      harness for the LLM-driven interview steps.
 - [~] Add tests for the `evolve` flow — drain `evolve_requests.jsonl`, perform
       the FSM transitions, write a checkpoint, apply, verify.
       Partial: (a) drain half shipped as `scripts/orchestrator.py drain-evolve-requests`
