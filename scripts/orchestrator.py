@@ -729,6 +729,34 @@ def _make_parser() -> argparse.ArgumentParser:
             "(supports repos with main / master / trunk / etc.)."
         ),
     )
+
+    cp_p = sub.add_parser(
+        "checkpoint-append",
+        help="Append a row to .iteration/checkpoints.md (pure-data, atomic).",
+        description=(
+            "Append a checkpoint row to a Markdown-table checkpoints "
+            "file. Handles the two pieces the LLM keeps fat-fingering: "
+            "the iter number (max(existing)+1, not count) and the "
+            "timestamp (local ISO-8601 with offset, never UTC `Z`). "
+            "Initializes the table header if the file is missing. "
+            "Echoes the appended row on stdout."
+        ),
+    )
+    cp_p.add_argument(
+        "--file", required=True,
+        help="Path to checkpoints.md (will be created if missing).",
+    )
+    cp_p.add_argument(
+        "--sha", required=True,
+        help="Commit SHA this checkpoint refers to (revert target).",
+    )
+    cp_p.add_argument(
+        "--summary", required=True,
+        help=(
+            "One-line human-readable summary. Must not contain a "
+            "literal `|` (would break the Markdown table)."
+        ),
+    )
     return p
 
 
@@ -1211,6 +1239,122 @@ def _cli_open_pr(args, out, err) -> int:
     return 0
 
 
+# Canonical Markdown-table header for a fresh checkpoints.md. Mirrors
+# the in-repo `.iteration/checkpoints.md` so a freshly-initialized file
+# and an actively-used one share the same shape (status command,
+# dashboards, future revert wrappers can rely on it).
+_CHECKPOINT_HEADER = (
+    "# auto-routines checkpoints\n"
+    "\n"
+    "Each row is a successful iter checkpoint. Append-only — never rewrite history.\n"
+    "Format: `iter | YYYY-MM-DDTHH:MM:SS±ZZZZ | sha | one-line summary`\n"
+    "\n"
+    "| iter | when | sha | summary |\n"
+    "|------|------|-----|---------|\n"
+)
+
+# Match a data row's leading iter cell. Allows leading whitespace inside
+# the cell (table writers sometimes pad). Captured group is the integer.
+_CHECKPOINT_ROW_ITER_RE = re.compile(r"^\|\s*(\d+)\s*\|")
+
+
+def _cli_checkpoint_append(args, out, err) -> int:
+    """Append a row to a Markdown-table checkpoints file.
+
+    The contract (pinned by `tests/test_checkpoint_append.py`):
+    - If the file is missing, write the canonical header + first row
+      with `iter=1`.
+    - If the file exists, parse out existing iter numbers, compute
+      `next = max(existing) + 1` (not `count + 1` — max is idempotent
+      under partial-write recovery), and append a single row.
+    - Timestamp uses `strftime('%Y-%m-%dT%H:%M:%S%z')` so we get a
+      local offset (`+HHMM` or `-HHMM`), never UTC `Z` — SKILL.md is
+      explicit about local-machine readability.
+    - Reject `|` in the summary loudly — silently writing it would
+      corrupt the table.
+    - Write atomically (tempfile + os.replace) so a crash mid-write
+      never leaves a half-written checkpoints.md.
+    - Echo the appended row on stdout so the caller can log it
+      without re-reading the file.
+    """
+    if "|" in args.summary:
+        print(
+            f"summary must not contain `|` (would break the Markdown "
+            f"table). Got: {args.summary!r}",
+            file=err,
+        )
+        return 1
+
+    target = pathlib.Path(args.file)
+
+    # Parse existing iters if the file exists. Tolerate a missing file
+    # (fresh install) without erroring — that's the first-checkpoint path.
+    existing_text = ""
+    existing_iters: list[int] = []
+    if target.exists():
+        try:
+            existing_text = target.read_text()
+        except OSError as e:
+            print(f"could not read {target}: {e}", file=err)
+            return 1
+        for line in existing_text.splitlines():
+            m = _CHECKPOINT_ROW_ITER_RE.match(line)
+            if m:
+                try:
+                    existing_iters.append(int(m.group(1)))
+                except ValueError:
+                    # A header row like "|------|------|" won't match
+                    # \d+, but defend against any other oddity.
+                    continue
+
+    next_iter = max(existing_iters) + 1 if existing_iters else 1
+
+    # Local ISO-8601 with offset. `%z` produces `+HHMM` (not `+HH:MM`),
+    # which matches the in-repo `.iteration/checkpoints.md`. The test
+    # regex accepts both shapes.
+    ts = dt.datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
+
+    row = f"| {next_iter} | {ts} | {args.sha} | {args.summary} |"
+
+    # Build the new content. If the file is missing OR the table header
+    # is absent, prepend the canonical header. Otherwise just append.
+    if not existing_text:
+        new_content = _CHECKPOINT_HEADER + row + "\n"
+    else:
+        # Preserve a trailing newline contract: if the existing file
+        # doesn't end in `\n`, add one before the new row.
+        sep = "" if existing_text.endswith("\n") else "\n"
+        new_content = existing_text + sep + row + "\n"
+
+    # Atomic write: tempfile in the same directory, then os.replace.
+    # Same-dir is critical — os.replace is only atomic on the same
+    # filesystem.
+    parent = target.parent
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        print(f"could not create parent dir {parent}: {e}", file=err)
+        return 1
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            dir=str(parent),
+            prefix=".checkpoints.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            tmp.write(new_content)
+            tmp_path = tmp.name
+        os.replace(tmp_path, str(target))
+    except OSError as e:
+        print(f"could not write checkpoint to {target}: {e}", file=err)
+        return 1
+
+    out.write(row + "\n")
+    return 0
+
+
 def _cli_test_fire(args, out, err) -> int:
     """Manual one-shot dispatch plan for `/auto-routines test-fire <id>`.
 
@@ -1311,6 +1455,9 @@ def cli_main(
 
     if args.command == "open-pr":
         return _cli_open_pr(args, out, err)
+
+    if args.command == "checkpoint-append":
+        return _cli_checkpoint_append(args, out, err)
 
     if args.command != "tick":
         print(f"unknown command: {args.command}", file=err)

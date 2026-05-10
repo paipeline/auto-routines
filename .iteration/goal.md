@@ -26,8 +26,17 @@ broken installs, or routines that drift back to "analyze only."
       resolution (12 invariants in `TestFsmPlan`); SKILL.md `Mode: evolve`
       step 4 now invokes it. The other transitions (COMPLETED on
       success_criterion-met, reactivation) stay LLM-driven — they
-      require natural-language signal interpretation. Checkpoint, apply,
-      verify halves remain as separate slices.
+      require natural-language signal interpretation. (c) Checkpoint
+      write half shipped as `scripts/orchestrator.py checkpoint-append` —
+      pulls iter-number-resolution (`max(existing)+1`) and timestamp
+      formatting (local ISO with offset, never UTC `Z`) out of LLM prose
+      into a pure-script wrapper. Atomic write via tempfile+os.replace;
+      rejects `|` in summary loudly; initializes the canonical Markdown
+      table header on fresh files. Pinned by `tests/test_checkpoint_append.py`
+      (11 invariants across TestFirstCheckpoint, TestSubsequentAppend,
+      TestRowFormat, TestErrorHandling). Apply, verify halves remain as
+      separate slices. SKILL.md install step 6k still uses the prose
+      template — harmonizing it to call this wrapper is a separate slice.
 - [x] Add a test that boots the post-commit hook in a sandbox and asserts the
       background routines fire (subshell exit code observable via the log).
       Shipped in `tests/test_post_commit_hook_sandbox.py` — 7 invariants
