@@ -69,7 +69,7 @@ These are the ground rules. Every mode below assumes them.
 
 3. **Checkpoint before any change.** `evolve` / `stop` / `start` each create a `iter-NNN: <summary>` commit and append the SHA to `.iteration/checkpoints.md`. The user must always be able to `revert`.
 
-4. **Dependency health check.** At the start of every mode, verify `gh auth status` (when `deps.gh != none`) and every MCP in `config.yaml > deps.mcps`. On fail: write `.iteration/halted.md`, STOP. Next invocation rechecks — on green, delete `halted.md` and continue.
+4. **Dependency health check.** At the start of every mode, verify `gh auth status` (when `deps.gh != none`) and every MCP in `config.yaml > deps.mcps`. On fail: write `.iteration/halted.md`, STOP. Next invocation rechecks — on green, delete `halted.md` and continue. See `docs/troubleshooting.md` for the common install halts (gh not authed, MCP missing, repo not pushed, missing `ANTHROPIC_API_KEY`).
 
 5. **Confirm before initial install.** After interview + render, show the proposed status block and ask the user to confirm. Subsequent `evolve` runs are fully auto.
 
