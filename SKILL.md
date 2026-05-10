@@ -25,6 +25,8 @@ Both are part of the install footprint now.
   state.json               # runtime ledger — orchestrator's persistent state (schema_version: 1)
   log.jsonl                # outcomes from each routine run (one line per fire)
   evolve_requests.jsonl    # mid-run evolve requests (drained by `evolve`)
+  local_dispatches.jsonl   # PRD #10 OQ4 — append-only log of local-surface fires from GHA, drained by scripts/local_poller.py
+  .poller-watermark        # PRD #10 OQ4 — per-clone consumption pointer for local_poller (gitignored)
   checkpoints.md           # iter SHAs for revert
   plan.txt                 # current text status block (rewritten every run)
   history/iter-NNN.md      # per-iteration summary
@@ -32,7 +34,7 @@ Both are part of the install footprint now.
   sanity-failed-NNN.md     # written when a proposed config fails sanity
   next-goal.md             # written when a goal-driven iteration goal is met
 .claude/
-  settings.json            # Claude Code hooks (merged) — includes the always-on Stop hook that drains evolve_requests
+  settings.json            # Claude Code hooks (merged) — includes (1) the always-on Stop hook that drains evolve_requests, (2) the OQ4 poller Stop hook that drains local_dispatches.jsonl
   skills/<routine_id>/     # per-routine prompt skills (filled from templates/routine-skill.md)
   skills/_shared/preamble.md  # PRD #10 Module 3 — shared FSM/log/PR/failure rules every routine references
 .github/
@@ -294,7 +296,24 @@ The eight steps below cluster into four phases:
    2. The CLI returns `{action: "created", issue_number: N, ...}` on stdout. The issue number is recorded in `state.json` automatically by the next sync; no manual write needed here.
    3. Confirm the issue is visible: `gh issue view N --repo <owner/name>`.
 
-   **6j. Two-step commit (preserves `checkpoints.md` inside the iter commit):**
+   **6j. Install the local-poller `Stop` hook (PRD #10 OQ4 phase 5).** Local-surface routines fire on the GHA tick, but execution happens on the user's machine. The workflow appends each local fire to `.iteration/local_dispatches.jsonl`; `scripts/local_poller.py poll` drains that queue. Wire it as a Stop hook so it runs after every Claude Code session.
+
+   Add to `.claude/settings.json > hooks.Stop[]` (merge — do NOT overwrite the evolve-drain hook from 6d):
+   ```json
+   {
+     "matcher": "",
+     "hooks": [{
+       "type": "command",
+       "command": "cd <abs repo root> && git fetch -q origin main 2>/dev/null && git checkout origin/main -- .iteration/local_dispatches.jsonl 2>/dev/null; python scripts/local_poller.py poll --log .iteration/local_dispatches.jsonl --watermark-file .iteration/.poller-watermark || true"
+     }]
+   }
+   ```
+
+   The `git fetch + checkout` dance pulls fresh log entries from `origin/main` (where the GHA workflow committed them) into the working tree without disturbing other files. Trailing `|| true` keeps a routine subprocess failure from blocking the user's Claude session — the poller payload reports per-fire exit codes for the operator to inspect.
+
+   `.iteration/.poller-watermark` is per-clone state and MUST be gitignored. The skill's stock `.gitignore` already excludes it; if you're installing into a repo that overrides `.gitignore`, add `/.iteration/.poller-watermark` explicitly.
+
+   **6k. Two-step commit (preserves `checkpoints.md` inside the iter commit):**
    1. `git add .iteration .claude .gitignore .git/hooks/post-commit .github/workflows/auto-routines.yml 2>/dev/null; git commit -m "iter-001: install auto-routines"`
    2. `SHA=$(git rev-parse HEAD); printf 'iter-001: %s  %s\n' "$SHA" "$(date +%Y-%m-%dT%H:%M:%S%z)" >> .iteration/checkpoints.md; git add .iteration/checkpoints.md && git commit --amend --no-edit`
    3. `git push origin HEAD` — the GHA workflow can't tick on a branch GitHub doesn't have yet.
@@ -319,6 +338,11 @@ The eight steps below cluster into four phases:
    - `.claude/skills/_shared/preamble.md` exists and contains no unfilled `{{placeholders}}`
    - `ANTHROPIC_API_KEY` is listed in `gh secret list --repo <owner/name>`
    - `config.yaml > schema_version` is `4` (older installs must be migrated via `scripts/migrate.py` first)
+   - **PRD #10 OQ4 (local poller wiring):**
+     - `scripts/local_poller.py` exists and is importable (`python -c "import importlib.util; importlib.util.spec_from_file_location('p', 'scripts/local_poller.py')"`)
+     - At least one entry in `.claude/settings.json > hooks.Stop[]` has a `command` containing `local_poller.py poll` AND `--watermark-file .iteration/.poller-watermark`
+     - `.gitignore` ignores `/.iteration/.poller-watermark` (per-clone state must not be committed)
+     - `.gitignore` allow-lists `/.iteration/local_dispatches.jsonl` (the workflow commits this file back; if it's ignored the workflow's commit-back step silently produces no diff and the poller never sees fires)
 
    If ANY check fails, write `.iteration/install-failed.md` with the missing artifacts and abort with a non-zero exit. Do not print "install successful" if anything is missing.
 

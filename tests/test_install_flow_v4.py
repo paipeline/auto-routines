@@ -166,3 +166,89 @@ class TestSchemaVersion:
         """SKILL.md must mention the current schema version so the
         operator knows which validator rules apply."""
         assert "schema_version: 4" in skill_text or "schema 4" in skill_text
+
+
+# ---------------------------------------------------------------------------
+# Local poller Stop hook wiring (PRD #10 OQ4 phase 5)
+# ---------------------------------------------------------------------------
+# The GHA workflow now appends to .iteration/local_dispatches.jsonl
+# (PR #20) and a `local_poller.py poll` subcommand drains the queue
+# (PRs #21, #22). The install must wire the Stop hook so the user
+# doesn't have to figure this out manually — otherwise local-surface
+# routines silently never fire on their machine.
+
+class TestInstallStopHookForPoller:
+    def test_install_mentions_local_poller_script(self, skill_text):
+        """Install step must reference scripts/local_poller.py — that's
+        where the hook command lives. Without a mention, the user has
+        to discover the file by reading source."""
+        assert "scripts/local_poller.py" in skill_text
+
+    def test_install_uses_poll_subcommand(self, skill_text):
+        """The hook should call `poll`, not `scan` or `fire` — only
+        `poll` does watermark persistence (phase 4)."""
+        # Look for `local_poller.py poll` together to pin the right
+        # subcommand was documented.
+        assert "local_poller.py poll" in skill_text
+
+    def test_install_references_watermark_file_path(self, skill_text):
+        """The poll command needs --watermark-file. Pin the canonical
+        path so different installs converge on the same location."""
+        assert ".iteration/.poller-watermark" in skill_text
+
+    def test_install_references_local_dispatches_log(self, skill_text):
+        """Same for --log: canonical path in install docs so users
+        don't fork it."""
+        assert ".iteration/local_dispatches.jsonl" in skill_text
+
+    def test_install_documents_git_fetch_dance(self, skill_text):
+        """Pollers need fresh log content from origin/main; without a
+        git fetch step in the hook, the poller only ever sees what's in
+        the working tree (which on a stale clone is nothing).
+        Pin that the install mentions the fetch step."""
+        # Either an explicit `git fetch` or a `git pull` in the hook
+        # context is acceptable.
+        text = skill_text
+        assert "git fetch" in text or "git pull" in text, (
+            "Stop-hook install must document how the poller picks up "
+            "new dispatch log entries from origin/main (git fetch + "
+            "checkout, or git pull in a worktree)"
+        )
+
+    def test_install_wires_stop_hook_for_poller(self, skill_text):
+        """Per Module 4: local-fire dispatches reach the user via a
+        Stop-hook poller. The install must add a Stop[] entry that runs
+        the poller — separate from the always-on evolve-drain Stop hook."""
+        # Look for a Stop hook entry that mentions the poller. Not too
+        # strict on exact JSON shape — just that a Stop hook + the
+        # poller script appear together within the install context.
+        # Find the install section bounds.
+        install_start = skill_text.find("### Install")
+        verify_start = skill_text.find("### Verify")
+        assert install_start != -1 and verify_start != -1
+        install_section = skill_text[install_start:verify_start]
+        assert "local_poller.py" in install_section
+        assert "Stop" in install_section
+
+
+class TestVerifyChecksPollerHook:
+    def test_verify_section_mentions_poller(self, skill_text):
+        """Verify step (step 7) should assert the poller hook exists.
+        Without that check, install-failed.md is silent on a missing
+        poller wire-up — the loudest possible foot-gun."""
+        verify_start = skill_text.find("### Verify")
+        assert verify_start != -1
+        verify_section = skill_text[verify_start:]
+        # Either explicit "local_poller" or "poller" mention in verify.
+        assert "local_poller" in verify_section or "poller" in verify_section
+
+
+class TestFilesManagedListsPollerArtifacts:
+    def test_files_block_lists_dispatch_log(self, skill_text):
+        """Operators should know local_dispatches.jsonl is part of the
+        install footprint (it's committed back by the GHA workflow)."""
+        assert "local_dispatches.jsonl" in skill_text
+
+    def test_files_block_lists_watermark_file(self, skill_text):
+        """And know that .poller-watermark is gitignored per-clone state."""
+        assert ".poller-watermark" in skill_text
