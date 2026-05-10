@@ -17,6 +17,7 @@ from .conftest import ROOT, sanity
 CATALOG_PATH = ROOT / "templates" / "routine-catalog.yaml"
 HOOK_TEMPLATE = ROOT / "templates" / "post-commit-hook.sh"
 ROUTINE_SKILL_TEMPLATE = ROOT / "templates" / "routine-skill.md"
+ROUTINE_PREAMBLE = ROOT / "templates" / "routine-preamble.md"
 
 REQUIRED_FIELDS = {
     "id", "purpose", "primitive", "trigger_default", "automation_default",
@@ -190,15 +191,27 @@ def test_post_commit_template_never_blocks_commits():
 # Routine skill template — the per-routine SKILL.md that gets generated
 # ---------------------------------------------------------------------------
 
-def test_routine_skill_template_mandates_branch_and_pr():
+def test_routine_skill_template_points_at_preamble():
+    """After PRD #10, the slim per-routine template no longer carries the
+    PR recipe inline — it lives in the shared preamble. The per-routine
+    file must point at the preamble so routines know where to look."""
     text = ROUTINE_SKILL_TEMPLATE.read_text()
-    # Regression guard: the failure mode the catalog exists to fix is that
-    # routines render plans instead of doing work. The template must bind
-    # them to commit + push + PR.
+    assert "_shared/preamble.md" in text, (
+        "slim per-routine template must reference _shared/preamble.md "
+        "so routines can consult FSM / output / PR-recipe / failure-modes"
+    )
+
+
+def test_preamble_template_mandates_branch_and_pr():
+    """Regression guard moved from the per-routine template to the preamble
+    after PRD #10 extracted shared boilerplate. The failure mode the
+    catalog exists to fix is that routines render plans instead of doing
+    work — the preamble must bind them to commit + push + PR."""
+    text = ROUTINE_PREAMBLE.read_text()
     for required in [
-        "routines/{{routine_id}}",   # branch convention
+        "routines/<routine-id>",   # branch convention (literal in preamble)
         "git push",
         "gh pr create",
         "Never push to main",
     ]:
-        assert required in text, f"routine-skill.md missing: {required!r}"
+        assert required in text, f"routine-preamble.md missing: {required!r}"

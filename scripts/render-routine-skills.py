@@ -1,43 +1,48 @@
 #!/usr/bin/env python3
 """
-One-shot renderer used to install auto-routines on its own repo.
+Renderer for auto-routines per-routine SKILL.md files (PRD #10 Module 3).
 
-Reads .iteration/config.yaml + templates/routine-catalog.yaml + templates/routine-skill.md,
-fills in {{placeholders}} for each ACTIVE routine, and writes
-.claude/skills/<routine_id>/SKILL.md.
+Reads .iteration/config.yaml + templates/routine-catalog.yaml +
+templates/routine-skill.md (slim) + templates/routine-preamble.md (shared),
+fills in {{placeholders}} for each ACTIVE routine, and writes:
 
-This script is *only* used during the self-hosting setup. The skill itself
-does the equivalent rendering inline during `init`. Kept in scripts/ for
-reproducibility — if you re-run this it overwrites the per-routine SKILLs.
+  .claude/skills/<routine_id>/SKILL.md   (per-routine, ≤3KB)
+  .claude/skills/_shared/preamble.md     (shared, install-once)
+
+Public surface (importable as a module — see tests/test_render.py):
+
+  render_routine_skill(template_text, routine, archetype, installed_at) -> str
+  render_preamble(preamble_text) -> str
+  ROUTINE_SPECIFIC_INPUTS: dict[str, str]   (routine-id → extra inputs block)
+
+Side-effect entry point:
+
+  main()  — reads config from disk, writes rendered files. Used by
+            SKILL.md install step 6c-6d.
 """
 from __future__ import annotations
 
 import datetime as dt
 import sys
 from pathlib import Path
+from typing import Optional
 
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-CONFIG = yaml.safe_load((ROOT / ".iteration" / "config.yaml").read_text())
-CATALOG = yaml.safe_load((ROOT / "templates" / "routine-catalog.yaml").read_text())
-TEMPLATE = (ROOT / "templates" / "routine-skill.md").read_text()
 
-ARCHETYPES = {a["id"]: a for a in CATALOG["archetypes"]}
+# ---------------------------------------------------------------------------
+# Routine-specific inputs (the per-archetype 'extra Inputs' bullets).
+# Keep one source of truth — these used to live in a giant inline string in
+# the template; lifting them here lets the template be archetype-agnostic.
+# ---------------------------------------------------------------------------
 
-INSTALLED_AT = dt.datetime.now().astimezone().isoformat(timespec="seconds")
-
-# Per-routine context that doesn't fit cleanly in the catalog body.
-ROUTINE_SPECIFIC_INPUTS = {
+ROUTINE_SPECIFIC_INPUTS: dict[str, str] = {
     "prd-implement": (
         "- `.iteration/goal.md` (the canonical PRD — required).\n"
         "- `.iteration/tasks.md` (cached task breakdown, if present).\n"
         "- `gh pr list --state all --search 'head:routines/prd-implement' --limit 20` "
-        "(your own past PRs, to avoid double-implementing).\n"
-        "- For self-hosted (this repo): `/tmp/auto-routines-test/iter-NNN-<slice>/` is "
-        "a temp repo you may create to validate a change end-to-end before opening "
-        "the PR. Tear it down on success; preserve on failure and reference the path "
-        "in the PR body."
+        "(your own past PRs, to avoid double-implementing)."
     ),
     "commit-tests": (
         "- `git show HEAD --stat` and `git show HEAD -- <changed files>` "
@@ -62,71 +67,133 @@ ROUTINE_SPECIFIC_INPUTS = {
     ),
 }
 
-SELF_EVOLVE_ON = """\
-You may file a mid-run evolve request if you decide your own config is wrong
-(too frequent, too rare, scope drift, no longer useful). Append one JSON line
-to `.iteration/evolve_requests.jsonl`:
 
-```json
-{"ts":"<local ISO8601 with offset>","routine_id":"<your id>","reason":"<one sentence>","suggested":"<one sentence>"}
-```
+# ---------------------------------------------------------------------------
+# Pure rendering — no I/O. Tested in tests/test_render.py.
+# ---------------------------------------------------------------------------
 
-Generate `ts` with `date +%Y-%m-%dT%H:%M:%S%z`. The always-on `Stop` hook
-fires `/auto-routines evolve` at the end of the next Claude session, which
-drains the file.
-"""
+def render_routine_skill(
+    template_text: str,
+    routine: dict,
+    archetype: dict,
+    installed_at: str,
+) -> str:
+    """Render one per-routine SKILL.md from the slim template.
 
-SELF_EVOLVE_OFF = (
-    "(self-evolve not enabled for this routine — your config is fixed by the "
-    "user. Do not write to `evolve_requests.jsonl`.)"
-)
+    Pure function: takes its inputs explicitly, returns the rendered string.
+    Does not touch the filesystem. The byte-budget rule (≤3KB) is enforced
+    elsewhere — this function does no budget checking itself.
 
+    Args:
+        template_text: contents of templates/routine-skill.md
+        routine: a routine entry from .iteration/config.yaml's routines list
+        archetype: the matching archetype from templates/routine-catalog.yaml
+        installed_at: ISO8601 local-time string (with tz offset, never `Z`)
 
-def render_one(routine: dict) -> str:
+    Returns:
+        The rendered SKILL.md as a string. No `{{placeholders}}` should
+        remain — caller may assert this.
+    """
     rid = routine["id"]
-    arch = ARCHETYPES.get(rid)
-    if not arch:
-        sys.exit(f"no archetype matches routine id={rid!r}")
-    body = arch["prompt_body"]
+    body = archetype["prompt_body"]
+    trigger_summary = routine["trigger"]["human"]
+    success = routine.get("success_criterion") or "(none — runs indefinitely)"
+    extra_inputs = ROUTINE_SPECIFIC_INPUTS.get(rid, "")
 
-    text = TEMPLATE
+    text = template_text
     text = text.replace("{{routine_id}}", rid)
     text = text.replace("{{purpose}}", routine["purpose"])
-    text = text.replace("{{installed_at}}", INSTALLED_AT)
+    text = text.replace("{{installed_at}}", installed_at)
     text = text.replace("{{iter_added}}", str(routine["iter_added"]))
     text = text.replace("{{primitive}}", routine["primitive"])
-    text = text.replace("{{trigger_summary}}", routine["trigger"]["human"])
-    text = text.replace(
-        "{{success_criterion}}",
-        routine.get("success_criterion") or "(none — runs indefinitely)",
-    )
-    text = text.replace(
-        "{{routine_specific_inputs}}",
-        ROUTINE_SPECIFIC_INPUTS.get(rid, "(no extra inputs)"),
-    )
+    text = text.replace("{{trigger_summary}}", trigger_summary)
+    text = text.replace("{{success_criterion}}", success)
+    text = text.replace("{{routine_specific_inputs}}", extra_inputs)
     text = text.replace("{{routine_prompt_body}}", body)
-    text = text.replace(
-        "{{self_evolve_block}}",
-        SELF_EVOLVE_ON if routine.get("self_evolve") else SELF_EVOLVE_OFF,
-    )
+
+    # Collapse the empty-extra-inputs case: if a routine has no extra inputs,
+    # the template's `{{routine_specific_inputs}}` line becomes a blank line
+    # between bullets. Tidy it up.
+    text = text.replace("\n\n## What to do", "\n## What to do")
+
     return text
 
 
-def main() -> int:
-    skills_dir = ROOT / ".claude" / "skills"
+def render_preamble(preamble_text: str) -> str:
+    """Render the shared preamble. No substitution — preamble is literal
+    content shared across every install. Returned as-is, but routed
+    through this function so future tweaks (e.g. injecting an
+    `installed_at` comment) have a single seam."""
+    return preamble_text
+
+
+# ---------------------------------------------------------------------------
+# Side-effect entry point — used by SKILL.md install step.
+# ---------------------------------------------------------------------------
+
+def _now_local_iso() -> str:
+    """Match the local-time rule: never UTC `Z`."""
+    return dt.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def main(repo_root: Optional[Path] = None) -> int:
+    root = repo_root or ROOT
+
+    config_path = root / ".iteration" / "config.yaml"
+    catalog_path = root / "templates" / "routine-catalog.yaml"
+    template_path = root / "templates" / "routine-skill.md"
+    preamble_path = root / "templates" / "routine-preamble.md"
+
+    if not config_path.exists():
+        sys.exit(f"missing {config_path} — run `/auto-routines init` first")
+    if not preamble_path.exists():
+        sys.exit(
+            f"missing {preamble_path} — install is incomplete, "
+            f"PRD #10 Module 3 requires this file"
+        )
+
+    config = yaml.safe_load(config_path.read_text())
+    catalog = yaml.safe_load(catalog_path.read_text())
+    template_text = template_path.read_text()
+    preamble_text = preamble_path.read_text()
+
+    archetypes = {a["id"]: a for a in catalog["archetypes"]}
+
+    skills_dir = root / ".claude" / "skills"
     skills_dir.mkdir(parents=True, exist_ok=True)
 
-    for routine in CONFIG["routines"]:
+    # 1. Render the shared preamble once.
+    shared_dir = skills_dir / "_shared"
+    shared_dir.mkdir(parents=True, exist_ok=True)
+    rendered_preamble = render_preamble(preamble_text)
+    if "{{" in rendered_preamble or "}}" in rendered_preamble:
+        sys.exit("preamble contains unfilled placeholders")
+    (shared_dir / "preamble.md").write_text(rendered_preamble)
+    print(f"wrote .claude/skills/_shared/preamble.md")
+
+    # 2. Render each per-routine SKILL.md.
+    installed_at = _now_local_iso()
+    for routine in config["routines"]:
         rid = routine["id"]
+        arch = archetypes.get(rid)
+        if not arch:
+            sys.exit(f"no archetype matches routine id={rid!r}")
+
+        rendered = render_routine_skill(
+            template_text=template_text,
+            routine=routine,
+            archetype=arch,
+            installed_at=installed_at,
+        )
+        if "{{" in rendered or "}}" in rendered:
+            sys.exit(f"unfilled placeholder in rendered SKILL for {rid!r}")
+
         out_dir = skills_dir / rid
         out_dir.mkdir(parents=True, exist_ok=True)
         out_file = out_dir / "SKILL.md"
-        rendered = render_one(routine)
-        # Sanity: no leftover {{placeholders}}
-        if "{{" in rendered or "}}" in rendered:
-            sys.exit(f"unfilled placeholder in {out_file}: {rendered[rendered.find('{{'):rendered.find('}}')+2]}")
         out_file.write_text(rendered)
-        print(f"wrote {out_file.relative_to(ROOT)}")
+        print(f"wrote {out_file.relative_to(root)}")
+
     return 0
 
 
