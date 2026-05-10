@@ -157,7 +157,7 @@ def test_catalog_header_documents_category_field(catalog):
 
 # Archetypes whose "real work" is posting comments rather than branch+commit.
 # They still must log and use increment_signal.
-COMMENT_ONLY_ARCHETYPES = {"pr-ci-watcher"}
+COMMENT_ONLY_ARCHETYPES = {"pr-ci-watcher", "secret-scan"}
 
 
 @pytest.mark.parametrize(
@@ -342,6 +342,97 @@ def test_meta_evolve_replans_iteration_slices(catalog):
     assert "branch" in body and "commit" in body, (
         "meta-evolve must branch + commit the rewritten tasks — analysis-only "
         "is the failure mode the catalog exists to prevent"
+    )
+
+
+def test_secret_scan_archetype_exists_and_polls_open_prs(catalog):
+    """goal.md (Catalog quality): "Add a `secret-scan` archetype: catches
+    leaked credentials in a PR and blocks merge with a comment."
+
+    The archetype must:
+      - exist in the catalog
+      - poll open PRs (primitive=scheduled — there is no native PR webhook
+        in the auto-routines surface, so a short-cadence poll is how
+        secret-scan stays close to "as soon as the diff lands")
+      - be reactive (responds to a PR existing with new commits, doesn't
+        proactively scan unrelated history)
+      - default to `auto` automation — silent on clean PRs, loud on
+        leaked secrets; this is exactly the kind of action that should
+        not require user approval
+    """
+    arch = next(
+        (a for a in catalog["archetypes"] if a["id"] == "secret-scan"),
+        None,
+    )
+    assert arch is not None, (
+        "secret-scan archetype is required (goal.md Catalog quality) — "
+        "without it, leaked credentials in PRs go unchecked"
+    )
+    assert arch["primitive"] == "scheduled", (
+        f"secret-scan primitive must be scheduled (poll open PRs), "
+        f"got {arch['primitive']!r}"
+    )
+    assert arch.get("category") == "reactive", (
+        "secret-scan is reactive — responds to existing PR diffs, doesn't "
+        "drive new work forward"
+    )
+    assert arch["automation_default"] == "auto", (
+        "secret-scan must default to auto — a leaked credential needs a "
+        "loud, immediate response, not a notification the user might miss"
+    )
+
+
+def test_secret_scan_blocks_merge_and_names_concrete_patterns(catalog):
+    """The prompt_body must encode the *blocking* behavior (post a
+    comment + set a failing status check so the PR can't merge), and it
+    must name concrete leak patterns so the routine doesn't fall back to
+    a vague 'look for secrets'."""
+    arch = next(
+        (a for a in catalog["archetypes"] if a["id"] == "secret-scan"),
+        None,
+    )
+    assert arch is not None, "secret-scan archetype required (see prior test)"
+    body = arch["prompt_body"].lower()
+    # Must comment on the PR — the user-visible signal.
+    assert "comment" in body, (
+        "secret-scan must comment on the PR — that's the user-visible "
+        "signal the routine produces"
+    )
+    # Must block merge — vague 'flag for review' is not enough.
+    assert any(
+        token in body
+        for token in ["block", "status check", "merge", "fail"]
+    ), (
+        "secret-scan must reference blocking the merge (status check, "
+        "failing review) — otherwise leaked credentials still merge"
+    )
+    # Must name concrete leak patterns so the routine actually looks for
+    # the right shapes, not just 'inspect the diff'.
+    assert any(
+        token in body
+        for token in [
+            "aws_", "api key", "api_key", "token", "password",
+            "private key", "credential",
+        ]
+    ), (
+        "secret-scan prompt must name concrete leak patterns "
+        "(AWS keys, API keys, tokens, passwords) — bare 'find secrets' "
+        "lets prompts drift back to analysis-only"
+    )
+
+
+def test_secret_scan_does_not_self_evolve(catalog):
+    """Security tooling that rewrites its own config is a foot-gun:
+    one bad self-evolve and the scanner stops looking for a class of
+    leaks. Pin it to fixed config."""
+    arch = next(
+        (a for a in catalog["archetypes"] if a["id"] == "secret-scan"),
+        None,
+    )
+    assert arch is not None, "secret-scan archetype required (see prior test)"
+    assert arch["self_evolve"] is False, (
+        "secret-scan must not self_evolve — security routines need fixed "
+        "config so a bad mid-run evolve can't quietly disable detection"
     )
 
 

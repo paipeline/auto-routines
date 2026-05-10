@@ -433,6 +433,72 @@ archetypes:
          - `increment_signal: false` if you concluded the existing
            breakdown still matches the new goal (rare but possible).
 
+  - id: secret-scan
+    purpose: "Scan open PR diffs for leaked credentials; comment + block merge when found."
+    primitive: scheduled
+    category: reactive
+    trigger_default: "every 15 minutes"
+    automation_default: auto
+    self_evolve: false
+    success_criterion: "0 leaked secrets merged in last 30 PRs"
+    stack_hints: [.env, .env.example, secrets.yaml, credentials.json, .gitignore]
+    prompt_body: |
+      Your job: catch credentials before they merge. Open PR diffs are
+      the window — once merged to main, a leaked secret has to be
+      revoked, rotated, and force-pushed out of history. Blocking at
+      PR time is cheap; blocking at merge time is not.
+
+      1. List open PRs updated since this routine's last fire:
+         `gh pr list --state open --limit 30 --json number,headRefName,headRefOid,updatedAt`.
+         Track `last_scanned_oid` per PR number in
+         `.iteration/secret-scan-state.json` so re-scans only look at
+         new commits.
+      2. For each PR with new commits since the cached oid:
+         a. Fetch the diff for the new commit range:
+            `gh pr diff <number> --name-only` then for each file
+            `gh api repos/{owner}/{repo}/pulls/{number}/files`.
+         b. Scan the *added* lines (lines starting with `+` and not `+++`)
+            for concrete leak patterns:
+            - AWS keys:          `AKIA[0-9A-Z]{16}`, `aws_secret_access_key\s*=`
+            - GitHub tokens:     `ghp_[A-Za-z0-9]{36}`, `gho_[A-Za-z0-9]{36}`
+            - API key style:     `api[_-]?key\s*=\s*['"][A-Za-z0-9_\-]{20,}`
+            - Generic passwords: `password\s*=\s*['"][^'"]{8,}['"]`
+            - Private keys:      `-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----`
+            - Stripe/Slack/etc:  `sk_live_[A-Za-z0-9]{24,}`, `xoxb-[0-9]+-[0-9]+-[A-Za-z0-9]+`
+            (Source the full pattern list from
+            `.iteration/secret-scan-state.json:patterns` if present so
+            users can extend it without editing this body.)
+         c. Allow-list: if a file matches `.env.example` or has a
+            `# secret-scan: allow` magic comment within 3 lines of the
+            hit, skip it (intentional placeholder).
+      3. If any leaks found in a PR:
+         a. Post a PR comment listing each hit with file, line, and the
+            redacted pattern name (NEVER repeat the credential value
+            itself in the comment — that just doubles the leak).
+         b. Set a failing review status on the PR so it blocks merge:
+            `gh pr review <number> --request-changes --body "Secret-scan
+            detected leaked credentials — see comment."`.
+         c. Re-request review on every subsequent fire until the diff
+            stops containing the leak (a forced-push or a removal
+            commit clears the block automatically).
+      4. If a previously-blocked PR is now clean (all hits removed):
+         post one "✓ secret-scan clear" comment and approve the review
+         block: `gh pr review <number> --approve --body "Secret-scan clear."`.
+      5. Update `.iteration/secret-scan-state.json` with the latest
+         scanned oid per PR.
+      6. Log per-PR outcomes to `.iteration/log.jsonl`. Use
+         `increment_signal: true` when you posted any comment or
+         status check.
+
+      You do NOT branch or commit code from this routine — its real
+      work is the PR comment + failing review status. (The fix has to
+      come from the PR author: remove the secret AND revoke it
+      out-of-band. This routine cannot revoke an upstream credential,
+      so the comment must instruct the author to do it.)
+
+      Never echo a credential value back in a comment. Use the
+      pattern name and file:line only.
+
   - id: release-tag-checker
     purpose: "When a release commit goes in without a version bump, flag it."
     primitive: git-hook
