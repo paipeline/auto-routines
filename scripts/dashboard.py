@@ -251,15 +251,25 @@ def _find_dashboard_issue(
     repo: str,
     gh_run: Callable[[list[str]], str],
 ) -> dict | None:
-    """Return the existing dashboard issue (matching DASHBOARD_MARKER)
-    or None. Searches OPEN + CLOSED so we don't double-create after a
-    user closes the issue — we update the existing closed one in place."""
+    """Return the live (OPEN) dashboard issue matching DASHBOARD_MARKER, or
+    None.
+
+    Searches OPEN + CLOSED but only returns OPEN matches. Closed dashboards
+    are deliberately skipped — per PRD #10 user story 19, the user closing
+    the dashboard is the 'iteration complete, ship and move on' signal. The
+    next tick must create a fresh dashboard for the new iteration rather
+    than resurrecting the closed one with new content. The closed issue
+    stays closed as the iteration's permanent archive marker.
+
+    If both an OPEN and a CLOSED dashboard exist (the normal mid-rollover
+    state), the OPEN one wins.
+    """
     out = gh_run([
         "issue", "list",
         "--repo", repo,
         "--state", "all",
         "--limit", str(_ISSUE_LIST_LIMIT),
-        "--json", "number,title,url,body",
+        "--json", "number,title,url,body,state",
     ])
     try:
         issues = json.loads(out) if out.strip() else []
@@ -267,7 +277,9 @@ def _find_dashboard_issue(
         return None
     for issue in issues:
         body = issue.get("body") or ""
-        if DASHBOARD_MARKER in body:
+        # `gh` returns state as "OPEN" / "CLOSED" (uppercase).
+        state = (issue.get("state") or "").upper()
+        if DASHBOARD_MARKER in body and state == "OPEN":
             return issue
     return None
 

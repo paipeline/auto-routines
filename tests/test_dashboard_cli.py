@@ -220,6 +220,7 @@ class TestSyncUpdate:
             "title": "auto-routines dashboard — iter 7",
             "url": "https://github.com/owner/repo/issues/42",
             "body": existing_body,
+            "state": "OPEN",
         }]))
         gh.add_response(["issue", "edit"], "")
 
@@ -264,6 +265,7 @@ class TestSyncUnchanged:
             "title": "auto-routines dashboard — iter 7",
             "url": "https://github.com/owner/repo/issues/42",
             "body": body,
+            "state": "OPEN",
         }]))
         out = io.StringIO()
         rc = dash.cli_main(

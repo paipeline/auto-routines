@@ -179,6 +179,7 @@ class TestUpdate:
             "title": "auto-routines dashboard — iter 7",
             "url": "https://github.com/owner/repo/issues/42",
             "body": _body_with_marker(dash, "OLD body"),
+            "state": "OPEN",
         }]
         gh.add_response(["issue", "list"], json.dumps(existing))
         gh.add_response(["issue", "edit"], "")
@@ -200,6 +201,7 @@ class TestUpdate:
             "title": "auto-routines dashboard — iter 7",
             "url": "https://github.com/owner/repo/issues/42",
             "body": body,
+            "state": "OPEN",
         }]
         gh.add_response(["issue", "list"], json.dumps(existing))
         out = dash.sync_dashboard(body, repo="owner/repo", iter_n=7, gh_run=gh)
@@ -218,12 +220,14 @@ class TestUpdate:
                 "title": "Some old auto-routines thing",
                 "url": "https://github.com/owner/repo/issues/9",
                 "body": "no marker here",
+                "state": "OPEN",
             },
             {
                 "number": 11,
                 "title": "Random custom title",
                 "url": "https://github.com/owner/repo/issues/11",
                 "body": _body_with_marker(dash, "real dashboard"),
+                "state": "OPEN",
             },
         ]
         gh.add_response(["issue", "list"], json.dumps(existing))
@@ -234,6 +238,97 @@ class TestUpdate:
         )
         assert out["action"] == "updated"
         assert out["issue_number"] == 11
+
+
+# ---------------------------------------------------------------------------
+# Closed dashboard → user signaled "iteration complete" (PRD #10 user story 19)
+# ---------------------------------------------------------------------------
+
+class TestClosedRollsIteration:
+    """User story 19: 'closing the dashboard issue manually' is the natural
+    'ship and move on' gesture. The next tick must not resurrect the closed
+    issue with new content — it must open a fresh dashboard. The closed
+    issue stays closed as the iteration's archive marker."""
+
+    def test_creates_new_when_existing_dashboard_is_closed(self, dash):
+        """The marker is found on a CLOSED issue → treat as 'iteration shipped',
+        create a new one rather than updating the closed one."""
+        gh = FakeGh()
+        existing = [{
+            "number": 42,
+            "title": "auto-routines dashboard — iter 7",
+            "url": "https://github.com/owner/repo/issues/42",
+            "body": _body_with_marker(dash, "old iter content"),
+            "state": "CLOSED",
+        }]
+        gh.add_response(["issue", "list"], json.dumps(existing))
+        gh.add_response(
+            ["issue", "create"],
+            "https://github.com/owner/repo/issues/55\n",
+        )
+        new_body = _body_with_marker(dash, "iter 8 content")
+        out = dash.sync_dashboard(
+            new_body, repo="owner/repo", iter_n=8, gh_run=gh,
+        )
+        # Must create a brand-new issue for iter 8, not edit issue #42.
+        assert out["action"] == "created", (
+            f"closed dashboard must trigger fresh create, got {out['action']!r}"
+        )
+        assert out["issue_number"] == 55
+        # The closed issue must not be touched.
+        assert not any(c[:2] == ["issue", "edit"] for c in gh.calls), (
+            "must NOT edit a closed dashboard issue — closing is the user's "
+            "ship-and-move-on signal (PRD #10 user story 19)"
+        )
+
+    def test_open_takes_precedence_over_closed(self, dash):
+        """If both an OPEN and CLOSED dashboard issue exist, the OPEN one is
+        the live target. The closed one is iteration history."""
+        gh = FakeGh()
+        existing = [
+            {
+                "number": 42,
+                "title": "auto-routines dashboard — iter 7",
+                "url": "https://github.com/owner/repo/issues/42",
+                "body": _body_with_marker(dash, "old closed iter"),
+                "state": "CLOSED",
+            },
+            {
+                "number": 50,
+                "title": "auto-routines dashboard — iter 8",
+                "url": "https://github.com/owner/repo/issues/50",
+                "body": _body_with_marker(dash, "live iter"),
+                "state": "OPEN",
+            },
+        ]
+        gh.add_response(["issue", "list"], json.dumps(existing))
+        gh.add_response(["issue", "edit"], "")
+        out = dash.sync_dashboard(
+            _body_with_marker(dash, "fresh"),
+            repo="owner/repo", iter_n=8, gh_run=gh,
+        )
+        # Must update the OPEN one (#50), not the closed one.
+        assert out["action"] == "updated"
+        assert out["issue_number"] == 50
+
+    def test_issue_list_fetches_state_field(self, dash):
+        """sync_dashboard's `gh issue list` must request the `state` field
+        — without it the open-vs-closed decision can't be made."""
+        gh = FakeGh()
+        gh.add_response(["issue", "list"], "[]")
+        gh.add_response(
+            ["issue", "create"],
+            "https://github.com/owner/repo/issues/1\n",
+        )
+        dash.sync_dashboard(
+            _body_with_marker(dash), repo="owner/repo", iter_n=1, gh_run=gh,
+        )
+        list_call = next(c for c in gh.calls if c[:2] == ["issue", "list"])
+        json_fields = _flag_value(list_call, "--json") or ""
+        assert "state" in json_fields, (
+            "gh issue list must include `state` in --json fields so "
+            "sync_dashboard can distinguish open from closed dashboards"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +362,7 @@ class TestRefuse:
             "title": "auto-routines dashboard — iter 7",  # title looks ours
             "url": "https://github.com/owner/repo/issues/99",
             "body": "Hand-written notes from the user. No marker.",
+            "state": "OPEN",
         }]
         gh.add_response(["issue", "list"], json.dumps(existing))
         gh.add_response(
