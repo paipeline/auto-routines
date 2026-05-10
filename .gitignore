@@ -20,3 +20,8 @@ node_modules/
 /.iteration/proposals/
 /.iteration/digests/
 /.claude/settings.local.json
+
+# Worktrees spawned by Claude Code's spawn_task / Task tool
+/.claude/worktrees/
+# Lockfile written by the scheduled-tasks MCP
+/.claude/scheduled_tasks.lock
