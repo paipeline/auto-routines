@@ -345,6 +345,98 @@ def test_meta_evolve_replans_iteration_slices(catalog):
     )
 
 
+def test_coverage_watcher_archetype_exists_with_correct_shape(catalog):
+    """goal.md (Catalog quality): "Add a `coverage-watcher` archetype: opens
+    a PR when project test coverage drops below threshold (per-language
+    detection: pytest-cov, jest --coverage)."
+
+    The archetype must:
+      - exist in the catalog
+      - run on a schedule (a coverage drop becomes visible only after
+        tests run; polling the coverage report is the natural surface)
+      - be reactive (it does NOT drive new features — it reacts to a
+        regression in an existing metric)
+      - default to `auto` automation — the response (open a PR adding
+        tests, or a notification PR) is something the user will see
+        and review either way
+      - NOT self_evolve — the threshold and tooling are user-owned
+        config; mid-run self-edits would silently change what counts
+        as 'green'
+    """
+    arch = next(
+        (a for a in catalog["archetypes"] if a["id"] == "coverage-watcher"),
+        None,
+    )
+    assert arch is not None, (
+        "coverage-watcher archetype is required (goal.md Catalog quality) "
+        "— without it, coverage regressions slip in unobserved"
+    )
+    assert arch["primitive"] == "scheduled", (
+        f"coverage-watcher primitive must be scheduled (poll the coverage "
+        f"report), got {arch['primitive']!r}"
+    )
+    assert arch.get("category") == "reactive", (
+        "coverage-watcher is reactive: it responds to a metric regression, "
+        "it doesn't drive new feature work forward"
+    )
+    assert arch["automation_default"] == "auto", (
+        "coverage-watcher must default to auto — the user already opted "
+        "into a coverage threshold, the response should not need a second "
+        "approval step"
+    )
+    assert arch["self_evolve"] is False, (
+        "coverage-watcher must NOT self_evolve — the threshold is user-owned "
+        "config; mid-run self-edits would silently lower the bar"
+    )
+
+
+def test_coverage_watcher_names_concrete_tooling_and_threshold(catalog):
+    """The prompt body must reference at least one concrete coverage tool
+    per supported stack — generic 'measure coverage' lets the prompt drift
+    to analysis-only. It must also name the threshold concept so the
+    routine knows what counts as a regression."""
+    arch = next(
+        (a for a in catalog["archetypes"] if a["id"] == "coverage-watcher"),
+        None,
+    )
+    assert arch is not None, "coverage-watcher archetype required (see prior test)"
+    body = arch["prompt_body"].lower()
+    # Must name at least one concrete coverage tool per stack so the
+    # routine actually runs something, not just 'check coverage'.
+    assert "pytest" in body or "coverage" in body, (
+        "coverage-watcher must reference pytest-cov / coverage.py for Python"
+    )
+    assert "jest" in body or "c8" in body or "nyc" in body, (
+        "coverage-watcher must reference a JS/TS coverage tool "
+        "(jest --coverage, c8, nyc) — goal.md called out per-language detection"
+    )
+    # Must reference a threshold so the routine knows what to react to.
+    assert "threshold" in body, (
+        "coverage-watcher must reference the coverage threshold — without "
+        "a fail-bar, the routine has nothing to react to"
+    )
+
+
+def test_coverage_watcher_opens_pr_on_regression(catalog):
+    """goal.md says explicitly: 'opens a PR when project test coverage
+    drops below threshold'. The prompt body must mandate the PR (not
+    just a comment or a log line), or the routine silently swallows
+    regressions."""
+    arch = next(
+        (a for a in catalog["archetypes"] if a["id"] == "coverage-watcher"),
+        None,
+    )
+    assert arch is not None, "coverage-watcher archetype required (see prior test)"
+    body = arch["prompt_body"].lower()
+    # Standard branch/commit/PR chain — coverage-watcher is NOT in
+    # COMMENT_ONLY_ARCHETYPES; it must do real branch+commit work.
+    assert "branch" in body, "coverage-watcher must branch on regression"
+    assert "commit" in body, "coverage-watcher must commit (tests added, or marker file)"
+    assert "pr" in body or "pull request" in body, (
+        "coverage-watcher must open a PR — that's the goal.md contract"
+    )
+
+
 def test_secret_scan_archetype_exists_and_polls_open_prs(catalog):
     """goal.md (Catalog quality): "Add a `secret-scan` archetype: catches
     leaked credentials in a PR and blocks merge with a comment."

@@ -433,6 +433,64 @@ archetypes:
          - `increment_signal: false` if you concluded the existing
            breakdown still matches the new goal (rare but possible).
 
+  - id: coverage-watcher
+    purpose: "Watch project test coverage and open a fix PR when it drops below threshold."
+    primitive: scheduled
+    category: reactive
+    trigger_default: "every 6 hours"
+    automation_default: auto
+    self_evolve: false
+    success_criterion: "coverage stays above configured threshold for 14 consecutive fires"
+    stack_hints: [pyproject.toml, pytest.ini, jest.config.js, package.json, .coveragerc, tox.ini]
+    prompt_body: |
+      Your job: keep test coverage from sliding. When the metric drops
+      below the configured threshold, push a real PR — either adding
+      the missing tests (preferred) or, when the regression is too
+      large to fix in one fire, opening a tracking PR with a concrete
+      task list.
+
+      1. Detect the stack and coverage tool:
+         - Python: `pyproject.toml` or `.coveragerc` or `tox.ini` → use
+           `coverage` / `pytest --cov`. Read threshold from
+           `[tool.coverage.report] fail_under` or
+           `config.yaml > coverage_watcher.threshold` (defaults to 80).
+         - Node: `package.json` with jest config → use `jest --coverage`.
+           Threshold from `jest.config.js > coverageThreshold.global.lines`
+           or `config.yaml > coverage_watcher.threshold`.
+         - Other: log `outcome: skip, reason: 'unsupported stack'` and exit.
+      2. Run the coverage tool. Use a 5-minute hard cap; tools that hang
+         get killed and logged as `outcome: err`.
+      3. Compare current line coverage vs threshold:
+         - At or above: log `outcome: ok, increment_signal: false` and exit.
+         - Below: continue.
+      4. Identify the gap:
+         - Per-file coverage diff: which files dropped from last known
+           good (cached in `.iteration/coverage-watcher-state.json`)?
+         - Which uncovered lines are *new code* (added since the cached
+           baseline, via `git log --diff-filter=A`)? Prioritize those —
+           legacy uncovered code is its own backlog.
+      5. Branch `routines/coverage-watcher`. Decide one of:
+         a. **Fixable in one fire**: gap is ≤ 3 files, each ≤ ~30 lines
+            uncovered. Write the tests, commit
+            `test(<scope>): cover <module> back to threshold`, and open
+            a PR titled `Restore coverage to <pct>% (<gap_pct>% drop)`.
+         b. **Tracking PR**: gap is larger. Commit a single file
+            `.iteration/coverage-watcher-todo.md` listing every
+            uncovered new path with file:line, ordered by lines uncovered.
+            Open a PR titled `Coverage regression: <pct>% (threshold <thresh>%)`
+            with the task list in the body. Subsequent fires update the
+            same file rather than opening duplicate PRs (keyed on
+            branch `routines/coverage-watcher`).
+      6. Update `.iteration/coverage-watcher-state.json` with the new
+         baseline (current coverage pct, per-file pct map).
+      7. Log outcome to `.iteration/log.jsonl`. `increment_signal: true`
+         when you opened or updated a PR.
+
+      Never lower the threshold to make the PR green — that's the
+      classic anti-pattern this routine exists to prevent. If the user
+      actually wants a lower threshold they'll edit
+      `config.yaml > coverage_watcher.threshold` themselves.
+
   - id: secret-scan
     purpose: "Scan open PR diffs for leaked credentials; comment + block merge when found."
     primitive: scheduled
