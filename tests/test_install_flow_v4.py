@@ -252,3 +252,73 @@ class TestFilesManagedListsPollerArtifacts:
     def test_files_block_lists_watermark_file(self, skill_text):
         """And know that .poller-watermark is gitignored per-clone state."""
         assert ".poller-watermark" in skill_text
+
+
+# ---------------------------------------------------------------------------
+# Token-frugality: status script copy (PRD goal.md — token-frugality block)
+# ---------------------------------------------------------------------------
+# `Mode: status` runs `python3 scripts/status.py` from the consumer repo's
+# working directory. The script ships inside the skill's package, NOT in
+# the consumer repo. SKILL.md `Mode: status` already cross-references
+# "Install copies scripts/status.py from the skill directory into the
+# consumer repo (step 6a)" — but step 6a is silent on it. Result: a fresh
+# install lands without the script, and `/auto-routines status` falls
+# back to an LLM rendering and burns tokens on every call. Pin the
+# instruction lives in step 6a so the cross-reference isn't a lie.
+
+class TestInstallStep6aCopiesStatusScript:
+    def test_step_6a_mentions_status_script(self, skill_text):
+        """Step 6a must instruct the operator to copy scripts/status.py
+        into the consumer repo. Without this, /auto-routines status
+        consumes Claude tokens — the exact problem the script was
+        created to fix."""
+        step_6a_start = skill_text.find("**6a.")
+        step_6b_start = skill_text.find("**6b.")
+        assert step_6a_start != -1, "step 6a header missing"
+        assert step_6b_start != -1, "step 6b header missing"
+        step_6a = skill_text[step_6a_start:step_6b_start]
+        assert "scripts/status.py" in step_6a, (
+            "step 6a must reference scripts/status.py; Mode: status "
+            "cross-references step 6a but the step itself is silent on it"
+        )
+
+    def test_step_6a_clarifies_source_is_skill_directory(self, skill_text):
+        """The script lives in the skill's package, not the user's
+        repo. Step 6a must say 'from the skill directory' (or an
+        equivalent pointer) so the operator copies FROM the right
+        place. Otherwise a fresh install can't find the source."""
+        step_6a_start = skill_text.find("**6a.")
+        step_6b_start = skill_text.find("**6b.")
+        step_6a_lower = skill_text[step_6a_start:step_6b_start].lower()
+        assert (
+            "skill directory" in step_6a_lower
+            or "skill package" in step_6a_lower
+            or "skill's directory" in step_6a_lower
+            or "from this skill" in step_6a_lower
+        ), (
+            "step 6a must clarify the script source is the skill "
+            "directory, not the user's repo"
+        )
+
+    def test_step_6a_target_path_matches_mode_status_invocation(self, skill_text):
+        """`Mode: status` runs `python3 scripts/status.py` from the
+        consumer-repo root. Step 6a must land the copy at exactly
+        `scripts/status.py` (relative to the consumer repo) — anywhere
+        else and the Mode: status command fails."""
+        step_6a_start = skill_text.find("**6a.")
+        step_6b_start = skill_text.find("**6b.")
+        step_6a = skill_text[step_6a_start:step_6b_start]
+        # The Mode: status block invokes `python3 scripts/status.py`.
+        # Step 6a must land the file at that same relative path.
+        assert "scripts/status.py" in step_6a
+        # And make the "relative to repo root" framing explicit so the
+        # operator doesn't put it inside .iteration/ by accident.
+        text_lower = step_6a.lower()
+        assert (
+            "repo root" in text_lower
+            or "consumer repo" in text_lower
+            or "relative to" in text_lower
+        ), (
+            "step 6a must clarify scripts/status.py lands relative to "
+            "repo root, not inside .iteration/"
+        )

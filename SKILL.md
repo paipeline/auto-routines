@@ -207,6 +207,22 @@ The eight steps below cluster into four phases:
    .iteration/history/iter-001-init.md
    ```
 
+   **Also copy `scripts/status.py` from the skill directory into the
+   consumer repo at `scripts/status.py`** (same relative path the
+   `Mode: status` block invokes — anywhere else and `/auto-routines
+   status` falls back to an LLM render and burns tokens on every call):
+
+   ```bash
+   mkdir -p scripts
+   cp "${CLAUDE_SKILL_DIR}/scripts/status.py" scripts/status.py
+   chmod +x scripts/status.py
+   ```
+
+   `${CLAUDE_SKILL_DIR}` is the absolute path to this skill's package
+   (e.g. `~/.claude/skills/auto-routines/`). If the env var isn't set,
+   substitute the literal skill directory path. The destination path is
+   relative to the repo root, NOT inside `.iteration/`.
+
    **6b. Pre-flight ownership check** (Guardrail 7) — list scheduled tasks, filter to `[auto-routines:<repo_slug>]`. If any leftover, ask via `AskUserQuestion` whether to reuse / neutralize / abort.
 
    **6c. Per-routine install** — for each routine in `config.yaml > routines[]`, dispatch on `routine.primitive`:
