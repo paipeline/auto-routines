@@ -19,8 +19,12 @@ broken installs, or routines that drift back to "analyze only."
       sanity-check). Currently the test suite only covers the schema and catalog.
 - [ ] Add tests for the `evolve` flow — drain `evolve_requests.jsonl`, perform
       the FSM transitions, write a checkpoint, apply, verify.
-- [ ] Add a test that boots the post-commit hook in a sandbox and asserts the
+- [x] Add a test that boots the post-commit hook in a sandbox and asserts the
       background routines fire (subshell exit code observable via the log).
+      Shipped in `tests/test_post_commit_hook_sandbox.py` — 7 invariants
+      across TestHappyPath, TestNonBlocking, TestLogObservability. Exposed
+      the stdio-redirect contract (git waits on inherited fds even with `&`);
+      SKILL.md step 6c now pins it as mandatory.
 - [ ] Mock the `gh pr create` path in a unit test so CI verifies the call shape
       without needing a real GitHub PR.
 

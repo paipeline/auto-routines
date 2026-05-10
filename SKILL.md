@@ -281,6 +281,13 @@ user is never staring at a silent terminal for more than a few seconds.
             && echo "{\"ts\":\"$(date +%Y-%m-%dT%H:%M:%S%z)\",\"routine\":\"<routine_id>\",\"outcome\":\"ok\"}" >> "$LOG" \
           ) &
         ```
+        **Stdio redirect is mandatory, not stylistic.** The
+        backgrounded subshell inherits git's stdout/stderr file
+        descriptors; if you omit `>> "$HOOK_LOG" 2>&1`, git waits
+        on those fds and the user's commit blocks until the routine
+        finishes — defeating the whole point of `&`. Pinned by
+        `tests/test_post_commit_hook_sandbox.py::TestNonBlocking
+        ::test_commit_returns_quickly_even_with_slow_routine`.
      3. Write the assembled file to `.git/hooks/post-commit`. `chmod +x .git/hooks/post-commit`.
      4. Append `.iteration/hook-output.log` to `.gitignore` (and any other path the script writes). Required for revert (Guardrail 4 of Mode `revert`).
      5. Transition `state: PROPOSED → ACTIVE`.
