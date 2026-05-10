@@ -34,8 +34,19 @@ broken installs, or routines that drift back to "analyze only."
       across TestHappyPath, TestNonBlocking, TestLogObservability. Exposed
       the stdio-redirect contract (git waits on inherited fds even with `&`);
       SKILL.md step 6c now pins it as mandatory.
-- [ ] Mock the `gh pr create` path in a unit test so CI verifies the call shape
+- [x] Mock the `gh pr create` path in a unit test so CI verifies the call shape
       without needing a real GitHub PR.
+      Shipped — `scripts/orchestrator.py open-pr` is the deterministic
+      wrapper. Resolves --base from origin's default branch when omitted
+      (works on main/master/trunk repos), forbids --repo (in-repo only),
+      propagates non-zero exits from both `git symbolic-ref` and `gh pr
+      create`. All external commands go through `subprocess.run` so the
+      call shape is testable via monkeypatch — no real `gh` invocation,
+      no real PR. Pinned by `tests/test_open_pr.py` (8 invariants across
+      TestOpenPrCallShape, TestOpenPrErrors, TestNoUnmockedSubprocess).
+      Routines can now opt into the wrapper for deterministic PR opening;
+      catalog adoption is a separate slice (no archetype rewrites in this
+      iteration).
 
 ### Catalog quality
 - [x] Add a `coverage-watcher` archetype: opens a PR when project test coverage

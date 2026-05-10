@@ -690,6 +690,45 @@ def _make_parser() -> argparse.ArgumentParser:
         required=True,
         help="Path to .iteration/config.yaml",
     )
+
+    # open-pr: deterministic wrapper around `gh pr create`. Routines and
+    # the install procedure can call this instead of asking the LLM to
+    # assemble the invocation. Tests mock subprocess.run to pin the
+    # call shape without needing a real GitHub PR (PRD goal.md
+    # "Coverage and correctness").
+    pr_p = sub.add_parser(
+        "open-pr",
+        help="Open a GitHub PR via `gh pr create` (subprocess-mockable wrapper).",
+        description=(
+            "Assemble a `gh pr create` invocation with the canonical "
+            "flag shape (--head, --base, --title, --body), auto-"
+            "resolving --base from origin's default branch when "
+            "omitted. Emits the PR URL on stdout on success. Never "
+            "passes --repo (in-repo only). All subprocess calls go "
+            "through `subprocess.run` so tests can mock the call "
+            "shape via monkeypatch."
+        ),
+    )
+    pr_p.add_argument(
+        "--head", required=True,
+        help="The branch the PR introduces (e.g. routines/foo).",
+    )
+    pr_p.add_argument(
+        "--title", required=True,
+        help="PR title (conventional-commit summary).",
+    )
+    pr_p.add_argument(
+        "--body", required=True,
+        help="PR body (markdown — explain why, then a checklist).",
+    )
+    pr_p.add_argument(
+        "--base", default=None,
+        help=(
+            "Target branch. If omitted, resolved from "
+            "`git symbolic-ref --short refs/remotes/origin/HEAD` "
+            "(supports repos with main / master / trunk / etc.)."
+        ),
+    )
     return p
 
 
@@ -1092,6 +1131,86 @@ def _cli_fsm_plan(args, out, err) -> int:
     return 0
 
 
+def _cli_open_pr(args, out, err) -> int:
+    """Deterministic wrapper around `gh pr create`.
+
+    Resolves the default base via `git symbolic-ref` when --base is
+    omitted, then invokes `gh pr create` with the canonical four
+    flags. Emits the PR URL on stdout on success; propagates non-zero
+    exits from either subprocess call.
+
+    Critically: ALL external commands go through `subprocess.run` so
+    tests can mock the call shape via `monkeypatch.setattr(subprocess,
+    "run", ...)`. This is the PRD's 'Mock the gh pr create path'
+    requirement made concrete — without a Python wrapper the call
+    shape lived only in LLM prompt bodies, untestable from CI."""
+    # Lazy import — pure-function callers don't pay the subprocess cost
+    # at module load.
+    import subprocess
+
+    base = args.base
+    if base is None:
+        # Resolve origin's default branch. The `--short` flag returns
+        # `origin/<branch>`; we strip the prefix to get just the branch.
+        # If this fails (no origin, detached HEAD), short-circuit
+        # BEFORE attempting gh — otherwise gh prints a misleading
+        # error about the base ref.
+        proc = subprocess.run(
+            ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            stderr_text = proc.stderr or ""
+            print(
+                "could not resolve default base branch via "
+                "`git symbolic-ref --short refs/remotes/origin/HEAD`. "
+                "Pass --base explicitly, or run "
+                "`git remote set-head origin --auto` to fix the "
+                f"origin HEAD ref. git stderr: {stderr_text.strip()}",
+                file=err,
+            )
+            return proc.returncode or 1
+        # Strip the `origin/` prefix; mirrors the canonical bash
+        # one-liner in templates/routine-preamble.md.
+        base = proc.stdout.strip()
+        if base.startswith("origin/"):
+            base = base[len("origin/"):]
+
+    # Assemble the canonical four-flag invocation. NO --repo — routines
+    # stay in-repo by design (cross-repo opens are out of scope and an
+    # attack surface). NO --draft — keep the surface minimal in this
+    # slice; add it as a separate flag when actually needed.
+    gh_argv = [
+        "gh", "pr", "create",
+        "--base", base,
+        "--head", args.head,
+        "--title", args.title,
+        "--body", args.body,
+    ]
+    proc = subprocess.run(gh_argv, capture_output=True, text=True)
+
+    # On failure, propagate stderr to the caller — silent success
+    # would falsely advance routine state (e.g., logging
+    # `outcome: ok, summary: <PR url>` when no PR opened).
+    if proc.returncode != 0:
+        stderr_text = (proc.stderr or "").strip()
+        stdout_text = (proc.stdout or "").strip()
+        if stderr_text:
+            print(stderr_text, file=err)
+        if stdout_text:
+            # Some gh failures put diagnostic info on stdout — surface
+            # it too, but to stderr so callers parsing stdout for the
+            # URL don't pick up garbage.
+            print(stdout_text, file=err)
+        return proc.returncode
+
+    # Success: gh prints the PR URL on stdout. Echo it through so
+    # the caller can capture it and put it in log lines / iter-NNN.md.
+    out.write(proc.stdout)
+    return 0
+
+
 def _cli_test_fire(args, out, err) -> int:
     """Manual one-shot dispatch plan for `/auto-routines test-fire <id>`.
 
@@ -1189,6 +1308,9 @@ def cli_main(
 
     if args.command == "fsm-plan":
         return _cli_fsm_plan(args, out, err)
+
+    if args.command == "open-pr":
+        return _cli_open_pr(args, out, err)
 
     if args.command != "tick":
         print(f"unknown command: {args.command}", file=err)
