@@ -1,6 +1,6 @@
 ---
 name: prd-implement
-description: On a schedule, pick the next unimplemented slice from .iteration/goal.md, design it, write code+tests, commit and open a PR. — installed by auto-routines on 2026-05-09T22:16:01+02:00, iter-1. Invoked by scheduled trigger (every 12 hours).
+description: On a schedule, pick the next unimplemented slice from .iteration/goal.md, design it, write code+tests, commit and open a PR. — installed by auto-routines on 2026-05-10T19:13:25+02:00, iter-1. Invoked by scheduled trigger (every 12 hours).
 ---
 
 # prd-implement
@@ -17,7 +17,7 @@ all tasks in .iteration/goal.md marked done
 ## Inputs to read at fire time
 - `.iteration/config.yaml` — read your own entry under `routines:`. Honor `automation_level` and `state` (see below).
 - Recent `git log` since last fire of this routine (look up your `last_fire_sha` in `.iteration/log.jsonl`).
-- - `.iteration/goal.md` (the canonical PRD — required).
+- `.iteration/goal.md` (the canonical PRD — required).
 - `.iteration/tasks.md` (cached task breakdown, if present).
 - `gh pr list --state all --search 'head:routines/prd-implement' --limit 20` (your own past PRs, to avoid double-implementing).
 - For self-hosted (this repo): `/tmp/auto-routines-test/iter-NNN-<slice>/` is a temp repo you may create to validate a change end-to-end before opening the PR. Tear it down on success; preserve on failure and reference the path in the PR body.

@@ -271,6 +271,52 @@ def test_post_commit_template_never_blocks_commits():
 # Routine skill template — the per-routine SKILL.md that gets generated
 # ---------------------------------------------------------------------------
 
+def test_routine_skill_template_has_no_double_bullet_at_routine_specific_inputs():
+    """PRD #10 user story 28: 'fix the existing double-bullet bug in
+    rendered SKILLs (line 20: `- - ...`)'.
+
+    Root cause: the template wraps {{routine_specific_inputs}} in a
+    leading `- ` ('- {{routine_specific_inputs}}'), but every entry in
+    ROUTINE_SPECIFIC_INPUTS starts with '- ' for the first line. So the
+    first rendered line is '- - foo' — the user-visible bug.
+
+    Fix: drop the leading '- ' from the template, since each
+    routine_specific_inputs value already supplies its own bullets.
+    """
+    text = ROUTINE_SKILL_TEMPLATE.read_text()
+    # The `{{routine_specific_inputs}}` line MUST NOT have a leading
+    # bullet — the substituted content brings its own.
+    for line in text.splitlines():
+        if "{{routine_specific_inputs}}" not in line:
+            continue
+        stripped = line.strip()
+        assert not stripped.startswith("- "), (
+            f"template line {line!r} prefixes "
+            "{{routine_specific_inputs}} with a bullet — every rendered "
+            "SKILL gets `- - ...` because the substituted value also "
+            "leads with a bullet (PRD #10 user story 28)"
+        )
+
+
+def test_rendered_skills_have_no_double_bullets():
+    """Belt-and-suspenders: rendered per-routine SKILLs must not contain
+    `- - ` anywhere in their input list (the user-visible double-bullet
+    bug from PRD #10 user story 28). If the template fix above lands but
+    a renderer change later reintroduces the issue, this catches it."""
+    skills_dir = ROOT / ".claude" / "skills"
+    if not skills_dir.exists():
+        pytest.skip("no rendered skills present (run scripts/render-routine-skills.py)")
+    offenders = []
+    for skill_md in skills_dir.glob("*/SKILL.md"):
+        for n, line in enumerate(skill_md.read_text().splitlines(), 1):
+            if line.startswith("- - "):
+                offenders.append(f"{skill_md.relative_to(ROOT)}:{n}: {line}")
+    assert not offenders, (
+        "rendered SKILL.md files contain double-bullet lines (PRD #10 "
+        "user story 28):\n" + "\n".join(offenders)
+    )
+
+
 def test_routine_skill_template_mandates_branch_and_pr():
     text = ROUTINE_SKILL_TEMPLATE.read_text()
     # Regression guard: the failure mode the catalog exists to fix is that

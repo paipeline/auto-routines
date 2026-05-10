@@ -1,6 +1,6 @@
 ---
 name: daily-digest
-description: Summarize today's commits, PRs, and routine activity into .iteration/digests/. — installed by auto-routines on 2026-05-09T22:16:01+02:00, iter-1. Invoked by scheduled trigger (6:00 PM daily).
+description: Summarize today's commits, PRs, and routine activity into .iteration/digests/. — installed by auto-routines on 2026-05-10T19:13:25+02:00, iter-1. Invoked by scheduled trigger (6:00 PM daily).
 ---
 
 # daily-digest
@@ -17,7 +17,7 @@ Summarize today's commits, PRs, and routine activity into .iteration/digests/.
 ## Inputs to read at fire time
 - `.iteration/config.yaml` — read your own entry under `routines:`. Honor `automation_level` and `state` (see below).
 - Recent `git log` since last fire of this routine (look up your `last_fire_sha` in `.iteration/log.jsonl`).
-- - `git log --since="00:00 today" --pretty=format:"%h %s (%an)"`
+- `git log --since="00:00 today" --pretty=format:"%h %s (%an)"`
 - `gh pr list --state all --search "updated:>$(date -u -v-1d +%Y-%m-%dT%H:%M:%SZ)"`
 - Tail of `.iteration/log.jsonl` since 00:00 today.
 
