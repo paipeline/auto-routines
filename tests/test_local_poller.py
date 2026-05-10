@@ -460,3 +460,220 @@ class TestFireSubcommand:
         # somewhere visible.
         runner = poller._default_runner
         assert callable(runner)
+
+
+# ---------------------------------------------------------------------------
+# Watermark file helpers — per-clone state on disk
+# ---------------------------------------------------------------------------
+# Phase 1-3 took --watermark from the CLI. Real callers (Stop hook, cron)
+# need persistent state so they don't re-fire entries on every invocation.
+# Watermark file lives at .iteration/.poller-watermark (gitignored — it's
+# per-clone consumption progress, not shared state).
+
+class TestReadWatermarkFile:
+    def test_missing_file_returns_zero(self, poller, tmp_path):
+        """First-ever run on a fresh clone: file doesn't exist. Default
+        to 0 (consume everything in the log). NOT an error — that would
+        trip the Stop hook on every install."""
+        path = tmp_path / "watermark"
+        assert poller.read_watermark_file(str(path)) == 0
+
+    def test_empty_file_returns_zero(self, poller, tmp_path):
+        """Truncated/empty file is the same case as missing. Defensive
+        against a partial write the next tick will overwrite anyway."""
+        path = tmp_path / "watermark"
+        path.write_text("")
+        assert poller.read_watermark_file(str(path)) == 0
+
+    def test_whitespace_only_returns_zero(self, poller, tmp_path):
+        """A trailing newline shouldn't trip parsing."""
+        path = tmp_path / "watermark"
+        path.write_text("   \n  \n")
+        assert poller.read_watermark_file(str(path)) == 0
+
+    def test_reads_integer_value(self, poller, tmp_path):
+        path = tmp_path / "watermark"
+        path.write_text("42\n")
+        assert poller.read_watermark_file(str(path)) == 42
+
+    def test_invalid_content_raises(self, poller, tmp_path):
+        """A non-integer in the file is corruption — fail loud rather
+        than reset to 0 (which would replay the entire log)."""
+        path = tmp_path / "watermark"
+        path.write_text("not a number")
+        with pytest.raises(ValueError, match="watermark"):
+            poller.read_watermark_file(str(path))
+
+    def test_negative_value_raises(self, poller, tmp_path):
+        """event_ids are non-negative; a negative watermark is corruption."""
+        path = tmp_path / "watermark"
+        path.write_text("-5")
+        with pytest.raises(ValueError, match=r"(?i)watermark"):
+            poller.read_watermark_file(str(path))
+
+
+class TestWriteWatermarkFile:
+    def test_writes_integer_value(self, poller, tmp_path):
+        path = tmp_path / "watermark"
+        poller.write_watermark_file(str(path), 7)
+        assert path.read_text().strip() == "7"
+
+    def test_creates_parent_dir(self, poller, tmp_path):
+        """Stop hook may run before any other auto-routines tooling has
+        touched .iteration/. Don't fail on missing dir."""
+        path = tmp_path / "nested" / "dir" / "watermark"
+        poller.write_watermark_file(str(path), 3)
+        assert path.exists()
+        assert path.read_text().strip() == "3"
+
+    def test_overwrites_existing_value(self, poller, tmp_path):
+        path = tmp_path / "watermark"
+        path.write_text("1")
+        poller.write_watermark_file(str(path), 99)
+        assert path.read_text().strip() == "99"
+
+    def test_atomic_write_uses_tempfile(self, poller, tmp_path, monkeypatch):
+        """A crash mid-write must not leave a corrupt watermark (which
+        would replay or skip routines silently). Atomic = tmpfile +
+        rename. Verify by checking that the tmpfile pattern .tmp
+        appears via os.rename or pathlib.replace flow."""
+        # Easier check: the source uses pathlib.replace or os.replace,
+        # both of which are atomic on POSIX.
+        import inspect
+        src = inspect.getsource(poller.write_watermark_file)
+        assert ".replace(" in src or "os.replace" in src, (
+            "watermark write must be atomic (tmpfile + replace)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# poll subcommand — orchestrates watermark read + fire + watermark write
+# ---------------------------------------------------------------------------
+
+class TestPollSubcommand:
+    def test_poll_reads_watermark_then_fires(self, poller, tmp_path):
+        """Watermark file says 1; log has entries 1 and 2; only entry 2
+        fires (entry 1 is already consumed)."""
+        log = tmp_path / "log.jsonl"
+        log.write_text(
+            json.dumps({"event_id": 1, "routine_id": "a",
+                        "ts": "2026-05-10T17:03:00-0700", "sha": "x"}) + "\n"
+            + json.dumps({"event_id": 2, "routine_id": "b",
+                          "ts": "2026-05-10T17:04:00-0700", "sha": "y"}) + "\n"
+        )
+        wm = tmp_path / "watermark"
+        wm.write_text("1")
+        runner = FakeRunner()
+        out, err = io.StringIO(), io.StringIO()
+        rc = poller.cli_main(
+            ["poll", "--log", str(log), "--watermark-file", str(wm)],
+            stdout=out, stderr=err, runner=runner,
+        )
+        assert rc == 0, err.getvalue()
+        assert len(runner.calls) == 1
+        assert runner.calls[0]["cmd"][runner.calls[0]["cmd"].index("--skill") + 1] == "b"
+
+    def test_poll_persists_new_watermark(self, poller, tmp_path):
+        """After firing, new watermark = max(event_id) of consumed
+        entries. File on disk reflects it for the next invocation."""
+        log = tmp_path / "log.jsonl"
+        log.write_text(
+            json.dumps({"event_id": 1, "routine_id": "a",
+                        "ts": "2026-05-10T17:03:00-0700", "sha": "x"}) + "\n"
+            + json.dumps({"event_id": 5, "routine_id": "b",
+                          "ts": "2026-05-10T17:04:00-0700", "sha": "y"}) + "\n"
+        )
+        wm = tmp_path / "watermark"
+        # No initial file → starts at 0
+        runner = FakeRunner()
+        out, err = io.StringIO(), io.StringIO()
+        rc = poller.cli_main(
+            ["poll", "--log", str(log), "--watermark-file", str(wm)],
+            stdout=out, stderr=err, runner=runner,
+        )
+        assert rc == 0, err.getvalue()
+        assert wm.exists()
+        assert wm.read_text().strip() == "5"
+
+    def test_poll_persists_watermark_even_on_failure(self, poller, tmp_path):
+        """Same policy as fire: don't infinite-retry broken routines.
+        Watermark advances regardless of subprocess outcome."""
+        log = tmp_path / "log.jsonl"
+        log.write_text(
+            json.dumps({"event_id": 3, "routine_id": "a",
+                        "ts": "2026-05-10T17:03:00-0700", "sha": "x"}) + "\n"
+        )
+        wm = tmp_path / "watermark"
+        runner = FakeRunner(exit_codes=[1])  # failure
+        out, err = io.StringIO(), io.StringIO()
+        rc = poller.cli_main(
+            ["poll", "--log", str(log), "--watermark-file", str(wm)],
+            stdout=out, stderr=err, runner=runner,
+        )
+        assert rc != 0, "rc must surface the routine failure"
+        assert wm.read_text().strip() == "3", (
+            "watermark must advance even when fire failed"
+        )
+
+    def test_poll_dry_run_does_not_persist(self, poller, tmp_path):
+        """--dry-run lets operators preview what would fire without
+        consuming the log. Watermark file MUST be untouched."""
+        log = tmp_path / "log.jsonl"
+        log.write_text(
+            json.dumps({"event_id": 7, "routine_id": "a",
+                        "ts": "2026-05-10T17:03:00-0700", "sha": "x"}) + "\n"
+        )
+        wm = tmp_path / "watermark"
+        wm.write_text("0")
+        runner = FakeRunner()
+        out, err = io.StringIO(), io.StringIO()
+        rc = poller.cli_main(
+            ["poll", "--log", str(log), "--watermark-file", str(wm), "--dry-run"],
+            stdout=out, stderr=err, runner=runner,
+        )
+        assert rc == 0, err.getvalue()
+        assert runner.calls == [], "dry-run must not invoke runner"
+        assert wm.read_text().strip() == "0", (
+            "dry-run must not persist a new watermark"
+        )
+
+    def test_poll_no_pending_does_not_change_watermark_file(self, poller, tmp_path):
+        """Empty pending → no fires, no change to watermark file (it
+        would re-write the same value, which is a wasted disk op + a
+        spurious mtime bump that confuses inotify-style watchers)."""
+        log = tmp_path / "log.jsonl"
+        log.write_text(
+            json.dumps({"event_id": 1, "routine_id": "a",
+                        "ts": "2026-05-10T17:03:00-0700", "sha": "x"}) + "\n"
+        )
+        wm = tmp_path / "watermark"
+        wm.write_text("1")
+        original_mtime = wm.stat().st_mtime_ns
+        runner = FakeRunner()
+        out, err = io.StringIO(), io.StringIO()
+        rc = poller.cli_main(
+            ["poll", "--log", str(log), "--watermark-file", str(wm)],
+            stdout=out, stderr=err, runner=runner,
+        )
+        assert rc == 0
+        assert runner.calls == []
+        # Same value, so file should not have been touched
+        assert wm.stat().st_mtime_ns == original_mtime, (
+            "no-op poll must not bump watermark file mtime"
+        )
+
+    def test_poll_missing_log_is_clean_exit(self, poller, tmp_path):
+        """Fresh install: no log file yet. Exit 0, no fires, watermark
+        unchanged."""
+        wm = tmp_path / "watermark"
+        runner = FakeRunner()
+        out, err = io.StringIO(), io.StringIO()
+        rc = poller.cli_main(
+            ["poll", "--log", str(tmp_path / "nope.jsonl"),
+             "--watermark-file", str(wm)],
+            stdout=out, stderr=err, runner=runner,
+        )
+        assert rc == 0, err.getvalue()
+        assert runner.calls == []
+        # No fires happened, so no watermark file was created
+        assert not wm.exists()

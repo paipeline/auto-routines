@@ -61,6 +61,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import pathlib
 import re
 import subprocess
 import sys
@@ -210,6 +212,54 @@ def _default_runner(cmd: list[str], *, timeout: int | None = None) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Watermark file — per-clone consumption progress
+# ---------------------------------------------------------------------------
+
+def read_watermark_file(path: str) -> int:
+    """Load the watermark from disk. Missing / empty file → 0.
+
+    Default-to-zero is deliberate: on a fresh install there's no file
+    yet, and the Stop hook would fail loudly otherwise. The trade-off
+    is that a freshly-cloned-into-existing-repo replays the entire log,
+    which is fine — local routines should be idempotent enough.
+
+    Corrupt content raises ValueError with a recognizable message. We
+    DO fail loud here because a corrupt watermark would either replay
+    routines (silent) or skip them (silent + worse)."""
+    p = pathlib.Path(path)
+    if not p.exists():
+        return 0
+    raw = p.read_text().strip()
+    if not raw:
+        return 0
+    try:
+        value = int(raw)
+    except ValueError as e:
+        raise ValueError(
+            f"watermark file {path!r} contains non-integer content: {raw!r}"
+        ) from e
+    if value < 0:
+        raise ValueError(
+            f"watermark file {path!r} has negative value {value} "
+            f"(event_ids are non-negative)"
+        )
+    return value
+
+
+def write_watermark_file(path: str, value: int) -> None:
+    """Atomically persist a new watermark. Tmpfile + rename so a crash
+    mid-write can't leave a half-truncated value (which would replay
+    or skip routines silently)."""
+    p = pathlib.Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(f"{value}\n")
+    # pathlib.Path.replace() wraps os.replace — atomic on POSIX, also
+    # works across volumes within the same filesystem.
+    tmp.replace(p)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -271,6 +321,32 @@ def _make_parser() -> argparse.ArgumentParser:
         "timeout — let the routine run to completion).",
     )
 
+    poll = sub.add_parser(
+        "poll",
+        help="Stop-hook entry point: read watermark from disk, fire any "
+        "new entries, persist the new watermark. The default mode for "
+        "production callers — `scan`/`fire` are for inspection/testing.",
+    )
+    poll.add_argument(
+        "--log", required=True,
+        help="Path to .iteration/local_dispatches.jsonl",
+    )
+    poll.add_argument(
+        "--watermark-file", required=True,
+        help="Path to per-clone watermark file (e.g. "
+        ".iteration/.poller-watermark — should be gitignored).",
+    )
+    poll.add_argument(
+        "--timeout", type=int, default=None,
+        help="Per-routine subprocess timeout in seconds (default: no "
+        "timeout — let the routine run to completion).",
+    )
+    poll.add_argument(
+        "--dry-run", action="store_true",
+        help="Report what would fire without actually invoking subprocesses "
+        "or persisting a new watermark. Useful for previewing.",
+    )
+
     return p
 
 
@@ -307,6 +383,8 @@ def cli_main(
         return _cmd_scan(args, stdout, stderr)
     if args.cmd == "fire":
         return _cmd_fire(args, stdout, stderr, runner)
+    if args.cmd == "poll":
+        return _cmd_poll(args, stdout, stderr, runner)
 
     print(f"unknown subcommand: {args.cmd}", file=stderr)
     return 2
@@ -366,6 +444,75 @@ def _cmd_fire(args, stdout, stderr, runner: Runner) -> int:
         "fires": fires,
         "next_watermark": next_watermark,
         "log_path": args.log,
+    }
+    json.dump(payload, stdout, indent=2)
+    stdout.write("\n")
+    return worst_rc
+
+
+def _cmd_poll(args, stdout, stderr, runner: Runner) -> int:
+    """Stop-hook entry point. Combines watermark-file I/O with fire mode:
+
+      1. read_watermark_file → current watermark
+      2. parse_log_lines + filter_new → pending entries
+      3. for each pending: runner(...) → record outcome
+      4. write_watermark_file(new_watermark) — only if pending was non-empty
+         and not --dry-run
+
+    Watermark advances even on partial subprocess failure (same policy
+    as fire). The Stop hook surfaces the worst non-zero rc upward."""
+    try:
+        current = read_watermark_file(args.watermark_file)
+    except ValueError as e:
+        print(f"error reading watermark file: {e}", file=stderr)
+        return 1
+
+    lines = _read_log_file(args.log)
+    try:
+        entries = parse_log_lines(lines)
+    except ValueError as e:
+        print(f"error parsing dispatch log: {e}", file=stderr)
+        return 1
+
+    pending = filter_new(entries, watermark=current)
+    next_watermark = max_event_id(entries, current=current)
+
+    fires: list[dict] = []
+    worst_rc = 0
+    if not args.dry_run:
+        for entry in pending:
+            cmd = build_fire_command(entry["routine_id"])
+            rc = runner(cmd, timeout=args.timeout)
+            fires.append({
+                "event_id": entry["event_id"],
+                "routine_id": entry["routine_id"],
+                "exit_code": rc,
+            })
+            if rc != 0:
+                worst_rc = max(worst_rc, rc)
+    else:
+        # Dry-run: report what WOULD fire, no subprocess, no watermark write.
+        fires = [
+            {"event_id": e["event_id"], "routine_id": e["routine_id"],
+             "exit_code": None}
+            for e in pending
+        ]
+
+    # Persist new watermark only when:
+    #   - we actually consumed something (pending non-empty), AND
+    #   - we're not in dry-run mode
+    # The first condition prevents spurious mtime bumps that confuse
+    # inotify-style watchers + saves disk ops on the empty-poll hot path.
+    if pending and not args.dry_run:
+        write_watermark_file(args.watermark_file, next_watermark)
+
+    payload = {
+        "fires": fires,
+        "previous_watermark": current,
+        "next_watermark": next_watermark,
+        "log_path": args.log,
+        "watermark_file": args.watermark_file,
+        "dry_run": args.dry_run,
     }
     json.dump(payload, stdout, indent=2)
     stdout.write("\n")

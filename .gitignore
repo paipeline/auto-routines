@@ -12,9 +12,15 @@ node_modules/
 !/.iteration/config.yaml
 # PRD #10 Module 5 — runtime ledger committed back by GHA after each tick
 !/.iteration/state.json
+# PRD #10 OQ4 — local-fire event log committed back alongside state.json
+# so any clone's poller can fetch + replay
+!/.iteration/local_dispatches.jsonl
 !/.iteration/goal.md
 !/.iteration/history/
 !/.iteration/checkpoints.md
+# Per-clone watermark for scripts/local_poller.py — explicitly NOT
+# committed (each clone tracks its own consumption point)
+/.iteration/.poller-watermark
 /.iteration/log.jsonl
 /.iteration/hook-output.log
 /.iteration/evolve_requests.jsonl
