@@ -355,6 +355,63 @@ archetypes:
          user to schedule.
       5. Log `increment_signal: true` if you opened a PR or wrote a proposal.
 
+  - id: meta-evolve
+    purpose: "When .iteration/goal.md changes, re-plan the iteration's task list and commit the new breakdown."
+    primitive: git-hook
+    trigger_default: "on every commit that touches .iteration/goal.md"
+    automation_default: auto
+    self_evolve: false
+    success_criterion: "tasks.md regenerated within 1 fire of every goal.md edit"
+    # path_filters is consumed by orchestrator.match_trigger (PRD #10
+    # priority rule 4): when the trigger reports a goal.md change in the
+    # commit's diff, the matcher returns ONLY routines whose path_filters
+    # match — meta-evolve fires alone, commit-tests/commit-lint sit out.
+    path_filters:
+      - .iteration/goal.md
+    stack_hints: [goal.md, prd.md, roadmap.md, ROADMAP.md]
+    prompt_body: |
+      The user just edited the iteration goal. Your job is to re-plan the
+      task list so prd-implement (and any other goal-consuming routine)
+      sees the new shape on its next fire. You write the rewritten tasks
+      AND commit them — never analysis-only.
+
+      1. Read the new goal:
+         - `.iteration/goal.md` is the canonical PRD/roadmap. Required.
+           If missing, log `outcome: err, summary: "no goal at .iteration/goal.md"`
+           and exit.
+         - `git show HEAD -- .iteration/goal.md` to see exactly what
+           changed in the triggering commit.
+      2. Read the prior task breakdown (if any):
+         - `.iteration/tasks.md` — the cached ordered task list other
+           routines consume. May not exist on first fire.
+      3. Decide what changed at the slice level:
+         - Which existing tasks are now obsolete (goal removed them)?
+         - Which existing tasks survive but need re-wording?
+         - Which new tasks does the goal imply that aren't on the list?
+         - For each "in progress" task (referenced by an open
+           `routines/prd-implement` PR — `gh pr list --state open
+           --search "head:routines/prd-implement"`), preserve it; do NOT
+           rip out work in flight.
+      4. Rewrite `.iteration/tasks.md`:
+         - 5–15 ordered tasks, smallest valuable unit first.
+         - Each task: one line, imperative ("add X", "extract Y", "test Z").
+         - Keep tasks already crossed off as `- [x]`; preserve their
+           ordering at the top.
+         - New tasks go at the bottom in dependency order.
+      5. Commit + PR:
+         - Branch: `git checkout -B routines/meta-evolve`.
+         - Commit with message
+           `chore(plan): re-plan tasks after goal.md change at <short SHA>`.
+         - Push and open a PR via `gh pr create`. Body: "what changed in
+           goal.md", "tasks added", "tasks removed", "tasks reworded".
+         - Hard cap: 10 minutes. If you can't make sense of the new
+           goal, commit a minimal rewrite with TODO markers and a
+           `WIP:` prefix; the next prd-implement fire will refine.
+      6. Log:
+         - `increment_signal: true` if tasks.md actually changed.
+         - `increment_signal: false` if you concluded the existing
+           breakdown still matches the new goal (rare but possible).
+
   - id: release-tag-checker
     purpose: "When a release commit goes in without a version bump, flag it."
     primitive: git-hook

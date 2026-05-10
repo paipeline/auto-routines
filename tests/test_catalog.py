@@ -211,6 +211,69 @@ def test_commit_tests_acknowledges_ci_overlap(catalog):
     )
 
 
+def test_meta_evolve_archetype_exists_with_goal_md_filter(catalog):
+    """PRD #10 priority rule 4: when `.iteration/goal.md` changes, only
+    `meta-evolve` should fire (re-plan iteration slices). The catalog
+    must declare the archetype with:
+      - primitive: git-hook (so it sits in the same dispatch lane as
+        commit-tests/commit-lint, but priority-elevates via path_filters)
+      - path_filters containing `.iteration/goal.md` so the orchestrator's
+        match_trigger() short-circuit picks it
+      - automation_default: auto (the user's goal edit means they want
+        re-planning to happen, not a notification)
+
+    Without this archetype the path_filters plumbing in
+    scripts/orchestrator.py is dead code — there's no routine on the
+    receiving end to consume the priority short-circuit.
+    """
+    archetypes = {a["id"]: a for a in catalog["archetypes"]}
+    assert "meta-evolve" in archetypes, (
+        "meta-evolve archetype is required by PRD #10 priority rule 4 — "
+        "it's the routine that consumes the goal.md path-filter short-circuit"
+    )
+    arch = archetypes["meta-evolve"]
+    assert arch["primitive"] == "git-hook", (
+        "meta-evolve must be git-hook — same dispatch lane as commit-tests, "
+        "elevated via path_filters not by a different primitive"
+    )
+    filters = arch.get("path_filters") or []
+    assert ".iteration/goal.md" in filters, (
+        f"meta-evolve must declare path_filters including '.iteration/goal.md' "
+        f"so match_trigger short-circuits to it on goal edits; got {filters!r}"
+    )
+    assert arch["automation_default"] == "auto", (
+        "meta-evolve must default to auto: a goal edit means re-plan now, "
+        "not 'wait for the user to approve a notification'"
+    )
+
+
+def test_meta_evolve_replans_iteration_slices(catalog):
+    """The meta-evolve prompt body must drive real re-planning work:
+    read the new goal, diff it against `.iteration/tasks.md`, rewrite
+    the task list, and commit. If the body is just 'analyze the diff',
+    the routine drifts back to plan-only — same failure mode the rest
+    of the catalog tests guard against."""
+    arch = next(
+        (a for a in catalog["archetypes"] if a["id"] == "meta-evolve"),
+        None,
+    )
+    assert arch is not None, "meta-evolve archetype required (see prior test)"
+    body = arch["prompt_body"].lower()
+    assert ".iteration/goal.md" in body, (
+        "meta-evolve must read .iteration/goal.md — it's the source of truth "
+        "for what re-planning means"
+    )
+    assert ".iteration/tasks.md" in body, (
+        "meta-evolve must update .iteration/tasks.md — the cached task "
+        "breakdown that other routines (prd-implement) consume"
+    )
+    # Must commit the result, not just print a diff.
+    assert "branch" in body and "commit" in body, (
+        "meta-evolve must branch + commit the rewritten tasks — analysis-only "
+        "is the failure mode the catalog exists to prevent"
+    )
+
+
 def test_prd_implement_drives_feature_work(catalog):
     """prd-implement is the routine that pushes feature work forward.
     It must be scheduled (not reactive), it must read .iteration/goal.md,
