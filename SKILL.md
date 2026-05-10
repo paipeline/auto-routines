@@ -16,9 +16,13 @@ You are operating the `auto-routines` skill. The user wants their repository to 
 
 ## Files this skill manages
 
+Schema 4 (PRD #10) added the GHA execution surface and a runtime ledger.
+Both are part of the install footprint now.
+
 ```
 .iteration/
-  config.yaml              # routines registry, goal, mode, deps, neutralized_tasks
+  config.yaml              # routines registry, goal, mode, deps, neutralized_tasks (schema_version: 4)
+  state.json               # runtime ledger — orchestrator's persistent state (schema_version: 1)
   log.jsonl                # outcomes from each routine run (one line per fire)
   evolve_requests.jsonl    # mid-run evolve requests (drained by `evolve`)
   checkpoints.md           # iter SHAs for revert
@@ -30,6 +34,9 @@ You are operating the `auto-routines` skill. The user wants their repository to 
 .claude/
   settings.json            # Claude Code hooks (merged) — includes the always-on Stop hook that drains evolve_requests
   skills/<routine_id>/     # per-routine prompt skills (filled from templates/routine-skill.md)
+  skills/_shared/preamble.md  # PRD #10 Module 3 — shared FSM/log/PR/failure rules every routine references
+.github/
+  workflows/auto-routines.yml  # PRD #10 Module 4 — the always-on execution surface (cron + dispatch)
 .git/hooks/post-commit     # only if a routine declares primitive: git-hook
 ```
 
@@ -166,8 +173,21 @@ The eight steps below cluster into four phases:
         Default to the archetype's `trigger_default`. Store `trigger.cron` (canonical) AND `trigger.human`.
      2. **Success criterion** (free text, optional). Default to the archetype's `success_criterion`.
      3. **Self-evolve allowed?** (yes/no). Default to the archetype's `self_evolve` flag.
+     4. **Execution surface** (`gha` / `local`) — only ask when `primitive` is `scheduled` or `pr-poll`:
+        ```
+        [gha]    Run on GitHub Actions — fires even when your laptop is closed (default)
+        [local]  Run on your machine — needs Claude Code open + scheduled-tasks MCP
+        ```
+        Default `gha`. Store as `routines[].execution_surface`. (PRD #10 user story 12.)
+     5. **Estimated minutes per fire** (1–30) — default 5. Used for the `gha_minutes_cap` budget tracker. Only asked when surface is `gha`.
 
-5. **Render & confirm** — stage `config.yaml` at `/tmp/auto-routines-staging-<repo_slug>/config.yaml`. Run `python3 scripts/sanity-check.py /tmp/auto-routines-staging-<repo_slug>/config.yaml`. Render the text status block per "Status display". Ask the user to confirm via `AskUserQuestion`. Do NOT proceed to step 6 without explicit confirmation.
+   - **Schema-4 dials** (asked once, after the per-routine loop, stored under `meta`):
+     - **Idle window** — "Should heavy autonomous work pause during your active hours? Format `HH:MM-HH:MM` (24h)."
+       Options: `[23:00-07:00]` (default), `[22:00-08:00]`, `[always]` (no gating), `[custom]`. Stored as `meta.idle_window`.
+     - **Idle window timezone** — `meta.idle_window_tz` is an IANA tz string (e.g. `America/Los_Angeles`, `Europe/Berlin`). Detect from the user's machine via `python -c "import datetime; print(datetime.datetime.now().astimezone().tzinfo.key)"` and confirm. Refuse silent UTC fallback — ask explicitly if detection fails.
+     - **GHA cost cap** — "How many GitHub Actions minutes per day max? (Free plans: 2000 min/month ≈ 60/day)" Default `60`. Stored as `meta.gha_minutes_cap`. Self-tracked in `state.json`, reset at midnight `idle_window_tz`.
+
+5. **Render & confirm** — stage `config.yaml` at `/tmp/auto-routines-staging-<repo_slug>/config.yaml` with `schema_version: 4`. Run `python3 scripts/sanity-check.py /tmp/auto-routines-staging-<repo_slug>/config.yaml` — this validates the new schema-4 fields (`execution_surface`, `idle_window`, `idle_window_tz`, `gha_minutes_cap`, `est_minutes`). Render the text status block per "Status display". Ask the user to confirm via `AskUserQuestion`. Do NOT proceed to step 6 without explicit confirmation.
 
 ---
 
@@ -250,9 +270,34 @@ The eight steps below cluster into four phases:
    ```
    Capture `task_id` to `config.yaml > meta.task_id`.
 
-   **6f. Two-step commit (preserves `checkpoints.md` inside the iter commit):**
-   1. `git add .iteration .claude .gitignore .git/hooks/post-commit 2>/dev/null; git commit -m "iter-001: install auto-routines"`
+   **6f. Render the shared preamble (PRD #10 Module 3).** Render `templates/routine-preamble.md` to `.claude/skills/_shared/preamble.md`. Idempotent — safe to re-run on `evolve`. Every per-routine SKILL.md references this file via the `## Reference` pointer, so it MUST exist before the per-routine renders in 6c are useful.
+
+   **6g. Write the GHA workflow (PRD #10 Module 4 — the execution surface).** Hard-fail if the repo isn't a GitHub repo (no `.git/config` remote pointing at github.com). Then:
+   1. Read `templates/auto-routines-workflow.yml` (or render from the canonical version at `.github/workflows/auto-routines.yml` in this repo).
+   2. Write to `.github/workflows/auto-routines.yml` in the user's repo.
+   3. Verify the `ANTHROPIC_API_KEY` repo secret is set: `gh secret list --repo <owner/name>` and grep for it. If missing, halt with `.iteration/install-failed.md` containing the setup command:
+      ```
+      gh secret set ANTHROPIC_API_KEY --repo <owner/name> < /path/to/key
+      ```
+      Do not continue — the workflow's headless Claude step will fail every tick without the secret.
+
+   **6h. Initialize `.iteration/state.json`.** This is the runtime ledger the orchestrator reads on every tick. Use `scripts/state.py`'s `initial_state(reset_date)` helper:
+   ```python
+   from scripts.state import initial_state
+   today = datetime.now(ZoneInfo(meta.idle_window_tz)).date().isoformat()
+   state_json = initial_state(today)
+   ```
+   Write it to `.iteration/state.json` (pretty-printed). The schema is pinned at `schema_version: 1`. Do NOT hand-craft this dict — the helper guarantees it passes `validate_state()`.
+
+   **6i. Open the iter-001 dashboard issue (PRD #10 Module 2 / user story 18).**
+   1. Render the initial dashboard body via `python scripts/dashboard.py sync --config .iteration/config.yaml --state .iteration/state.json --log .iteration/log.jsonl --repo <owner/name> --iter 1`.
+   2. The CLI returns `{action: "created", issue_number: N, ...}` on stdout. The issue number is recorded in `state.json` automatically by the next sync; no manual write needed here.
+   3. Confirm the issue is visible: `gh issue view N --repo <owner/name>`.
+
+   **6j. Two-step commit (preserves `checkpoints.md` inside the iter commit):**
+   1. `git add .iteration .claude .gitignore .git/hooks/post-commit .github/workflows/auto-routines.yml 2>/dev/null; git commit -m "iter-001: install auto-routines"`
    2. `SHA=$(git rev-parse HEAD); printf 'iter-001: %s  %s\n' "$SHA" "$(date +%Y-%m-%dT%H:%M:%S%z)" >> .iteration/checkpoints.md; git add .iteration/checkpoints.md && git commit --amend --no-edit`
+   3. `git push origin HEAD` — the GHA workflow can't tick on a branch GitHub doesn't have yet.
 
 ---
 
@@ -261,11 +306,19 @@ The eight steps below cluster into four phases:
 7. **Verify install** — this step is what catches "I rendered a plan but installed nothing". For every routine in `config.yaml`:
    - `state: ACTIVE` in config.yaml
    - `.claude/skills/<routine_id>/SKILL.md` exists, has no unfilled `{{placeholders}}`
-   - If `primitive: scheduled`: the `task_id` in config matches a real entry in `mcp__scheduled-tasks__list_scheduled_tasks` whose description starts with `[auto-routines:<repo_slug>]`
+   - If `primitive: scheduled` or `pr-poll`: `routine.execution_surface` is set to `gha` or `local` (schema 4 requirement; sanity-check would catch this on next evolve, but we want to fail fast at install)
+   - If `primitive: scheduled`: the `task_id` in config matches a real entry in `mcp__scheduled-tasks__list_scheduled_tasks` whose description starts with `[auto-routines:<repo_slug>]` (only required when `execution_surface: local`; for `gha` routines the GHA workflow is the dispatcher)
    - If `primitive: hook`: an entry exists in `.claude/settings.json > hooks.<event>[]` with command containing `/<routine_id>`
    - If `primitive: git-hook`: `.git/hooks/post-commit` is executable AND contains `/<routine_id>`
    - The meta task exists in the MCP listing
    - The always-on `Stop` evolve-drain hook exists in `.claude/settings.json`
+
+   Schema-4 install artifacts (PRD #10):
+   - `.iteration/state.json` exists, parses, and `state.validate_state()` returns `[]`
+   - `.github/workflows/auto-routines.yml` exists and parses as YAML
+   - `.claude/skills/_shared/preamble.md` exists and contains no unfilled `{{placeholders}}`
+   - `ANTHROPIC_API_KEY` is listed in `gh secret list --repo <owner/name>`
+   - `config.yaml > schema_version` is `4` (older installs must be migrated via `scripts/migrate.py` first)
 
    If ANY check fails, write `.iteration/install-failed.md` with the missing artifacts and abort with a non-zero exit. Do not print "install successful" if anything is missing.
 
