@@ -1,7 +1,9 @@
 # Troubleshooting
 
 This page covers the common failure modes you'll hit during `init`, what
-they look like, and exactly how to fix them.
+they look like, and exactly how to fix them. For a happy-path walkthrough
+of what to expect when nothing goes wrong, see
+[first-24h.md](./first-24h.md).
 
 If `init` halted, the skill wrote one of two diagnostic files:
 

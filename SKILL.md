@@ -398,6 +398,14 @@ user is never staring at a silent terminal for more than a few seconds.
    are valid outcomes; the line goes into the welcome block verbatim. No
    LLM tokens.
 
+   Also point the user at the two reference docs in the welcome block:
+
+   - `docs/first-24h.md` — what to expect hour-by-hour over the next day
+     (post-install layout, first reactive fire, first scheduled tick,
+     first auto-PR, then `/auto-routines evolve`).
+   - `docs/troubleshooting.md` — if any of those milestones don't look
+     like the walkthrough, jump straight here.
+
    Finally delete `/tmp/auto-routines-staging-<repo_slug>/`.
 
 ## Mode: `evolve`
