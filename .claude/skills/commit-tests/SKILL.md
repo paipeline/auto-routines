@@ -1,6 +1,6 @@
 ---
 name: commit-tests
-description: Run pytest after every commit; if it fails, open a fix PR. — installed by auto-routines on 2026-05-09T22:16:01+02:00, iter-1. Invoked by git-hook trigger (on every git commit).
+description: Run pytest after every commit; if it fails, open a fix PR. — installed by auto-routines on 2026-05-10T18:52:50+02:00, iter-1. Invoked by git-hook trigger (on every git commit).
 ---
 
 # commit-tests
@@ -25,6 +25,30 @@ all tests green for 50 consecutive commits
 **This is not a planning skill. You produce real diffs, not analysis.**
 
 The user just committed. Your job:
+
+0. **Relevance gates — skip when CI would catch it anyway.**
+   Most repos already run pytest on push via CI (`.github/workflows/ci.yml`
+   or equivalent). This routine earns its keep by being a *fast local
+   feedback loop on real code changes* — not by duplicating CI on every
+   commit. Apply these gates BEFORE running anything:
+
+   a. **WIP commits.** If the HEAD commit message matches
+      `^[Ww][Ii][Pp]\b` or `^wip:` (i.e. the user explicitly marked it
+      mid-flow), log `outcome: noop, increment_signal: false,
+      summary: "skipped — WIP commit"` and exit. The user does not want
+      pytest noise on a checkpoint they already labeled incomplete.
+
+   b. **Docs-only commits.** Run `git show HEAD --name-only --pretty=format:`
+      and check the changed files. If every changed path matches
+      `*.md`, lives under `docs/`, or is otherwise non-source
+      (e.g. `LICENSE`, `*.txt`, `*.rst`, `*.adoc`, image assets,
+      `.gitignore`), log `outcome: noop, increment_signal: false,
+      summary: "skipped — docs-only commit (N files)"` and exit.
+      Pytest cannot fail on prose changes; CI catches anything else.
+
+   These gates exist *because* of CI overlap, not in spite of it.
+   Without them this routine burns minutes re-testing every README
+   tweak. Do not remove them without revisiting PRD #10 OQ5.
 
 1. Detect the test runner from the repo (package.json scripts.test,
    pyproject.toml [tool.pytest], Cargo.toml, go.mod, Gemfile, etc.).

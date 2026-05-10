@@ -130,6 +130,54 @@ def test_expected_archetypes_are_present(catalog):
         assert required in ids, f"missing expected archetype: {required}"
 
 
+def test_commit_tests_has_relevance_gates(catalog):
+    """commit-tests fires on every commit, but for a repo that already has
+    CI on push (which auto-routines does), running pytest on every WIP or
+    docs-only commit is pure overhead — CI re-tests when the branch is
+    pushed anyway. The archetype must include relevance gates so it earns
+    its keep over CI rather than duplicating it.
+
+    The audit (PRD #10 OQ5) called for two specific gates:
+      1. Skip WIP commits (commit message matches `^WIP` or `^wip:`) —
+         the user is mid-flow, doesn't want noise.
+      2. Skip docs-only commits (HEAD touches only *.md, docs/, or other
+         non-source paths) — pytest can't fail on prose changes.
+
+    These keep commit-tests as a *fast local feedback loop* on real code
+    changes (where CI is too slow to be useful) rather than redundant
+    work on every commit."""
+    arch = next(a for a in catalog["archetypes"] if a["id"] == "commit-tests")
+    body = arch["prompt_body"].lower()
+
+    # Gate 1: WIP
+    assert "wip" in body, (
+        "commit-tests must reference WIP-commit gating — otherwise it "
+        "pytest's mid-flow checkpoints the user explicitly marked as "
+        "incomplete (PRD #10 OQ5)"
+    )
+
+    # Gate 2: docs-only
+    # Body should mention docs / *.md / non-source so the gate is actionable.
+    assert any(token in body for token in ["docs-only", "docs/", "*.md", ".md", "non-source"]), (
+        "commit-tests must reference docs-only gating — otherwise pytest "
+        "runs on README edits and burns minutes for zero signal "
+        "(PRD #10 OQ5)"
+    )
+
+
+def test_commit_tests_acknowledges_ci_overlap(catalog):
+    """The prompt body must explicitly note that CI also runs tests on
+    push, so future maintainers don't strip out the gates thinking they're
+    redundant safety. The gates exist *because* of the overlap, not in
+    spite of it."""
+    arch = next(a for a in catalog["archetypes"] if a["id"] == "commit-tests")
+    body = arch["prompt_body"].lower()
+    assert "ci" in body, (
+        "commit-tests prompt_body must mention CI so the value-add over "
+        "ci.yml is documented in the prompt itself (PRD #10 OQ5)"
+    )
+
+
 def test_prd_implement_drives_feature_work(catalog):
     """prd-implement is the routine that pushes feature work forward.
     It must be scheduled (not reactive), it must read .iteration/goal.md,
