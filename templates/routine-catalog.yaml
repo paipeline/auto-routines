@@ -30,6 +30,13 @@
 #                        These MUST tell the routine to actually do work
 #                        (write code, run commands, commit, open PRs) —
 #                        not just analyze.
+#   shell_variant:       optional path to a pure-shell script that produces
+#                        the same artifact with zero Claude tokens. When set,
+#                        the prompt_body branches on `meta.budget`: `low` and
+#                        `medium` dispatch the shell variant directly; `high`
+#                        and `custom` run the full LLM flow. Used by
+#                        `daily-digest` (see PRD .iteration/goal.md — Token
+#                        frugality block).
 #
 # IMPORTANT: every prompt_body ends by telling the routine to commit on
 # `routines/<id>` and open a PR if `automation_level: auto`. Never push to main.
@@ -329,8 +336,20 @@ archetypes:
     self_evolve: false
     success_criterion: ""
     stack_hints: []
+    shell_variant: scripts/daily-digest.sh
     prompt_body: |
       Write a one-page digest of today's repo activity.
+
+      0. Budget check (token-frugality path, PRD goal.md):
+         - Read `meta.budget` from `.iteration/config.yaml`.
+         - If `meta.budget` is `low` or `medium`:
+             - Run `bash scripts/daily-digest.sh "00:00 today" > .iteration/digests/$(date +%Y-%m-%d).md`.
+             - Commit the digest on `routines/daily-digest` and open a PR
+               (or push to main if `config.yaml > daily_digest.push_direct: true`).
+             - Log outcome with `increment_signal: true` and EXIT — do not
+               run the LLM flow below. The whole point of low/medium is
+               zero Claude tokens for the digest body.
+         - If `meta.budget` is `high` or `custom`: continue with the LLM flow.
 
       1. Gather:
          - `git log --since="00:00 today" --pretty=format:"%h %s (%an)"`

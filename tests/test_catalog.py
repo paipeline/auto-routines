@@ -739,3 +739,83 @@ def test_routine_skill_template_mandates_branch_and_pr():
         "Never push to main",
     ]:
         assert required in text, f"routine-skill.md missing: {required!r}"
+
+
+# ---------------------------------------------------------------------------
+# daily-digest shell variant (PRD goal.md — Token frugality)
+# ---------------------------------------------------------------------------
+# PR #44 shipped scripts/daily-digest.sh — a pure-shell digest that costs
+# zero Claude tokens. This block pins the catalog wiring: the daily-digest
+# archetype must declare the shell variant exists and instruct the
+# routine to dispatch the script (NOT the LLM flow) when meta.budget is
+# `low` or `medium`. Without these pins the catalog drifts back to
+# always-LLM and the shell variant rots unused.
+
+def _daily_digest(catalog: dict) -> dict:
+    for arch in catalog["archetypes"]:
+        if arch["id"] == "daily-digest":
+            return arch
+    raise AssertionError("daily-digest archetype not found in catalog")
+
+
+class TestDailyDigestShellVariant:
+    def test_daily_digest_declares_shell_variant_field(self, catalog):
+        """The archetype must declare `shell_variant: scripts/daily-digest.sh`
+        so install-time logic (or the LLM at fire time) knows the shell
+        alternative exists. Without this field there's nothing the
+        renderer or scheduler can branch on."""
+        dd = _daily_digest(catalog)
+        assert "shell_variant" in dd, (
+            "daily-digest must declare shell_variant pointing at the "
+            "pure-shell script — PRD goal.md (Token frugality)"
+        )
+        assert dd["shell_variant"] == "scripts/daily-digest.sh", (
+            f"shell_variant must point at the canonical script path; "
+            f"got {dd['shell_variant']!r}"
+        )
+
+    def test_shell_variant_script_exists_on_disk(self, catalog):
+        """The path the archetype declares must actually exist —
+        catching the 'I edited the catalog but forgot to commit the
+        script' regression."""
+        dd = _daily_digest(catalog)
+        script_path = ROOT / dd["shell_variant"]
+        assert script_path.exists(), (
+            f"daily-digest.shell_variant points at {script_path} but "
+            "no such file exists"
+        )
+        assert script_path.is_file()
+
+    def test_daily_digest_prompt_branches_on_budget(self, catalog):
+        """The prompt_body must instruct the routine to dispatch the
+        shell variant when meta.budget is low or medium. Otherwise
+        even repos that declare `meta.budget: low` still run the
+        full LLM digest and burn tokens."""
+        dd = _daily_digest(catalog)
+        prompt = dd["prompt_body"]
+        # The prompt must mention both meta.budget and the shell script.
+        assert "meta.budget" in prompt, (
+            "daily-digest prompt_body must reference meta.budget so "
+            "the routine knows when to take the shell path"
+        )
+        assert "scripts/daily-digest.sh" in prompt, (
+            "daily-digest prompt_body must reference scripts/daily-digest.sh "
+            "so the routine dispatches it directly"
+        )
+        # And name at least one budget tier that triggers the branch.
+        prompt_lower = prompt.lower()
+        assert "low" in prompt_lower and "medium" in prompt_lower, (
+            "daily-digest prompt_body must name both `low` and "
+            "`medium` as the tiers that trigger the shell branch"
+        )
+
+    def test_catalog_header_documents_shell_variant_field(self, catalog):
+        """The catalog header block lists every archetype field with
+        a one-liner. shell_variant must be documented there too —
+        operators reading the catalog should not have to guess what
+        the field does."""
+        header = CATALOG_PATH.read_text().split("archetypes:")[0]
+        assert "shell_variant" in header, (
+            "catalog header block must document the shell_variant "
+            "field so operators understand its purpose"
+        )
