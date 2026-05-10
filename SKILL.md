@@ -29,7 +29,8 @@ You are operating the `auto-routines` skill. The user wants their repository to 
   next-goal.md             # written when a goal-driven iteration goal is met
 .claude/
   settings.json            # Claude Code hooks (merged) — includes the always-on Stop hook that drains evolve_requests
-  skills/<routine_id>/     # per-routine prompt skills (filled from templates/routine-skill.md)
+  skills/_shared/preamble.md  # shared boilerplate (FSM, log schema, PR recipe, self-evolve, failure modes) — installed once per repo
+  skills/<routine_id>/     # per-routine prompt skills (filled from templates/routine-skill.md, ≤3KB each)
 .git/hooks/post-commit     # only if a routine declares primitive: git-hook
 ```
 
@@ -187,10 +188,12 @@ The eight steps below cluster into four phases:
 
    **6b. Pre-flight ownership check** (Guardrail 7) — list scheduled tasks, filter to `[auto-routines:<repo_slug>]`. If any leftover, ask via `AskUserQuestion` whether to reuse / neutralize / abort.
 
+   **6c-prep. Render the shared preamble** (PRD #10 Module 3) — copy `templates/routine-preamble.md` verbatim to `.claude/skills/_shared/preamble.md`. This is the single source of truth for FSM transitions, `log.jsonl` schema, the `automation_level` dispatch table, the PR/commit recipe, the self-evolve `evolve_requests.jsonl` schema, and failure modes. There is no template substitution — the file is identical for every install. Verify after writing: file exists, contains no `{{placeholders}}`. Routines reference it on demand; most fires never read it.
+
    **6c. Per-routine install** — for each routine in `config.yaml > routines[]`, dispatch on `routine.primitive`:
 
    - **`primitive: scheduled` or `primitive: pr-poll`:**
-     1. Read `templates/routine-skill.md`. Fill all `{{placeholders}}` (see "Placeholder semantics"). Use the archetype's `prompt_body` from the catalog as `{{routine_prompt_body}}` unless the user typed a custom prompt.
+     1. Read `templates/routine-skill.md` (the slim template after PRD #10). Fill the `{{placeholders}}` (see "Placeholder semantics"). Use the archetype's `prompt_body` from the catalog as `{{routine_prompt_body}}` unless the user typed a custom prompt. The slim template no longer carries FSM / output / PR-recipe / self-evolve / failure-modes — those live in `_shared/preamble.md` (rendered in 6c-prep). The rendered file MUST be ≤ `meta.max_routine_skill_bytes` (default 3000 bytes); per-routine override via `routines[].max_skill_bytes` if a coordinator-style archetype legitimately needs more.
      2. Write the filled file to `.claude/skills/<routine_id>/SKILL.md`.
      3. Call `mcp__scheduled-tasks__create_scheduled_task` with:
         ```
@@ -258,9 +261,15 @@ The eight steps below cluster into four phases:
 
 ### Verify + ship (steps 7–8)
 
-7. **Verify install** — this step is what catches "I rendered a plan but installed nothing". For every routine in `config.yaml`:
+7. **Verify install** — this step is what catches "I rendered a plan but installed nothing". First, the shared install (one-time):
+   - `.claude/skills/_shared/preamble.md` exists, is non-empty, and contains no `{{placeholders}}`
+   - The preamble contains the canonical sections: `## State handling`, `## Outputs`, `## Self-evolution`, `## Failure modes`, `## You MUST commit and open a PR`, and the verbatim local-time rule `date +%Y-%m-%dT%H:%M:%S%z`
+
+   Then, for every routine in `config.yaml`:
    - `state: ACTIVE` in config.yaml
    - `.claude/skills/<routine_id>/SKILL.md` exists, has no unfilled `{{placeholders}}`
+   - The rendered SKILL is ≤ `meta.max_routine_skill_bytes` (default 3000) or ≤ the routine's `max_skill_bytes` override
+   - The rendered SKILL contains the `## Reference` pointer to `_shared/preamble.md` (otherwise routines won't know where to look for shared mechanics)
    - If `primitive: scheduled`: the `task_id` in config matches a real entry in `mcp__scheduled-tasks__list_scheduled_tasks` whose description starts with `[auto-routines:<repo_slug>]`
    - If `primitive: hook`: an entry exists in `.claude/settings.json > hooks.<event>[]` with command containing `/<routine_id>`
    - If `primitive: git-hook`: `.git/hooks/post-commit` is executable AND contains `/<routine_id>`
