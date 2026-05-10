@@ -121,6 +121,77 @@ def is_firing_state(state: Any) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# match_trigger() — raw event → candidates list
+# ---------------------------------------------------------------------------
+
+# Trigger types this orchestrator understands. The dispatch surface (GHA
+# workflow, local hook bridge, /run command) is responsible for emitting
+# one of these shapes.
+_KNOWN_TRIGGER_TYPES = frozenset({"cron", "hook", "git-hook", "manual"})
+
+
+def match_trigger(trigger: dict, routines: list[dict]) -> list[dict]:
+    """Filter `routines` to the ones that should be considered for
+    dispatch given this trigger. Returns a new list.
+
+    Trigger shapes:
+      {"type": "cron",     "cron_expr": "*/30 * * * *"}
+      {"type": "hook",     "hook_event": "Stop"}
+      {"type": "git-hook"}
+      {"type": "manual",   "routine_ids": ["pr-watcher", "daily-digest"]}
+
+    Cron matching is string-exact — equivalent expressions like
+    `*/30 * * * *` and `0,30 * * * *` do NOT both match the same trigger,
+    by design (the trigger system already chose one expression to fire
+    on; matching by string keeps dispatch deterministic).
+
+    Manual triggers ignore primitive entirely — if the user explicitly
+    says 'run X', we trust them. State and automation_level still apply
+    in tick().
+    """
+    if not isinstance(trigger, dict):
+        raise ValueError(f"trigger must be a dict, got {type(trigger).__name__}")
+    ttype = trigger.get("type")
+    if ttype not in _KNOWN_TRIGGER_TYPES:
+        raise ValueError(
+            f"trigger.type must be one of {sorted(_KNOWN_TRIGGER_TYPES)}, "
+            f"got {ttype!r}"
+        )
+
+    if ttype == "cron":
+        cron_expr = trigger.get("cron_expr")
+        if not cron_expr:
+            raise ValueError("cron trigger requires cron_expr")
+        return [
+            r for r in routines
+            if r.get("primitive") in ("scheduled", "pr-poll")
+            and (r.get("trigger") or {}).get("cron") == cron_expr
+        ]
+
+    if ttype == "hook":
+        event = trigger.get("hook_event")
+        if not event:
+            raise ValueError("hook trigger requires hook_event")
+        return [
+            r for r in routines
+            if r.get("primitive") == "hook"
+            and (r.get("trigger") or {}).get("event") == event
+        ]
+
+    if ttype == "git-hook":
+        return [r for r in routines if r.get("primitive") == "git-hook"]
+
+    # manual
+    ids = trigger.get("routine_ids")
+    if ids is None:
+        raise ValueError("manual trigger requires routine_ids list")
+    id_set = set(ids)
+    # Preserve config order — the user's mental model is the order they
+    # see in `status`, not the order they typed.
+    return [r for r in routines if r.get("id") in id_set]
+
+
+# ---------------------------------------------------------------------------
 # tick() — the dispatch decision
 # ---------------------------------------------------------------------------
 
