@@ -129,6 +129,23 @@ The eight steps below cluster into four phases:
 | **Install**     | 6     | Write artifacts on disk + MCP.                       |
 | **Verify+ship** | 7–8   | Audit every artifact; print final status.            |
 
+### Progress reporting (applies to every step)
+
+Install is slow — ~10 minutes of MCP calls + file writes. **Stream a one-line
+phase header before each step so the user knows what's happening:**
+
+- Before each sub-step in Install (step 6): print `→ [6X] <one-line summary>`
+  on its own line — e.g. `→ [6a] Create .iteration/ skeleton`,
+  `→ [6c] Per-routine install: prd-implement`, `→ [6g] Write GHA workflow`.
+- During Verify (step 7): print `✓ <check name>` for each check that passes
+  and `✗ <check name>: <one-sentence reason>` for each that fails. The user
+  sees every artifact-check tick in real time instead of a wall of status
+  at the end.
+- Keep markers terse — one line per step, no banners, no progress bars.
+
+This directive applies to BOTH step 6 (install) and step 7 (verify) so the
+user is never staring at a silent terminal for more than a few seconds.
+
 ---
 
 ### Preflight (steps 1–3)

@@ -472,3 +472,108 @@ class TestModeBudget:
             "Mode: budget must cross-reference the existing test/code "
             "pin so the contract has a backstop"
         )
+
+
+# ---------------------------------------------------------------------------
+# Skill UX: streamed progress during init
+# ---------------------------------------------------------------------------
+# PRD `.iteration/goal.md` (Skill UX): "Better progress reporting during
+# `init` — currently the user sees a long silence then a wall of status.
+# Stream phase headers as we go." This is the most painful first-impression
+# in the whole skill: install does ~10 minutes of MCP calls + file writes
+# with zero stdout. Pin a directive in SKILL.md that each step emits a
+# one-line progress marker before it runs, and Verify emits a tick/cross
+# per check so the user knows what's being audited.
+#
+# Tests assert the directive exists, applies to BOTH install (step 6) and
+# verify (step 7), and lives where the install agent will actually see it
+# (Guardrails or Mode: init intro — not buried in a sub-paragraph).
+
+class TestInitProgressStreaming:
+    def test_install_section_documents_progress_emission(self, skill_text):
+        """The install section must instruct the agent to print a
+        progress marker before each sub-step. Without this directive
+        the agent does the whole step block silently — the exact
+        complaint in the PRD."""
+        text_lower = skill_text.lower()
+        # Accept any reasonable phrasing that pins per-step emission.
+        markers = [
+            "progress marker",
+            "phase header",
+            "stream phase",
+            "stream a header",
+            "progress reporting",
+            "→ [",
+            "print before each",
+            "emit before each",
+        ]
+        assert any(m in text_lower for m in markers), (
+            "SKILL.md must include a progress-reporting directive so "
+            "the install agent prints a per-step marker instead of "
+            "running silently for ~10 minutes (PRD goal: Skill UX)"
+        )
+
+    def test_progress_directive_covers_install_and_verify(self, skill_text):
+        """The directive must cover BOTH step 6 (install) and step 7
+        (verify). The verify step is where the user wants real-time
+        confirmation that each artifact landed — silent verify is
+        the second-worst UX after silent install."""
+        # Find the install section (step 6) and verify section (step 7).
+        install_start = skill_text.find("### Install (step 6")
+        verify_start = skill_text.find("### Verify + ship")
+        next_after_verify = skill_text.find("## Mode: `evolve")
+        assert install_start != -1, "install section header missing"
+        assert verify_start != -1, "verify section header missing"
+        assert next_after_verify != -1, "evolve section header missing"
+        install_section = skill_text[install_start:verify_start]
+        verify_section = skill_text[verify_start:next_after_verify]
+        # Either the directive lives inline in each section, or the
+        # top-level Mode: init intro names both phases. Accept either.
+        init_intro_start = skill_text.find("## Mode: `init`")
+        init_intro = skill_text[init_intro_start:install_start]
+        text_blob = (install_section + verify_section + init_intro).lower()
+        # Both phases must be explicitly named in the progress directive
+        # OR the directive must say "every step" / "each step".
+        assert (
+            ("each step" in text_blob and "progress" in text_blob)
+            or ("every step" in text_blob and "progress" in text_blob)
+            or ("step 6" in text_blob and "step 7" in text_blob and "progress" in text_blob)
+            or ("install" in text_blob and "verify" in text_blob and "progress" in text_blob)
+        ), (
+            "progress directive must cover BOTH install (step 6) and "
+            "verify (step 7) — not just one of them"
+        )
+
+    def test_progress_directive_lives_in_discoverable_location(self, skill_text):
+        """Buried-in-a-paragraph directives get ignored. The directive
+        must live in Guardrails, Mode: init intro, or as its own
+        sub-heading — somewhere the install agent will see on a quick
+        scan."""
+        # Acceptable locations: Guardrails (## Guardrails), Mode: init
+        # intro (text between ## Mode: `init` and ### Preflight), or a
+        # dedicated sub-heading anywhere.
+        guardrails_start = skill_text.find("## Guardrails")
+        fsm_start = skill_text.find("## The finite state machine")
+        init_start = skill_text.find("## Mode: `init`")
+        preflight_start = skill_text.find("### Preflight (steps 1")
+        assert all(
+            x != -1
+            for x in (guardrails_start, fsm_start, init_start, preflight_start)
+        )
+
+        guardrails = skill_text[guardrails_start:fsm_start].lower()
+        init_intro = skill_text[init_start:preflight_start].lower()
+
+        # Look for the directive in a high-visibility section.
+        directive_keywords = ("progress", "phase header", "→ [")
+        in_guardrails = any(k in guardrails for k in directive_keywords)
+        in_init_intro = any(k in init_intro for k in directive_keywords)
+        # Also accept a dedicated sub-heading like "### Progress reporting"
+        has_dedicated_heading = (
+            "### Progress" in skill_text or "#### Progress" in skill_text
+        )
+        assert in_guardrails or in_init_intro or has_dedicated_heading, (
+            "progress directive must live in Guardrails, Mode: init "
+            "intro, or under a dedicated sub-heading — not buried in a "
+            "step's prose where the install agent skims past it"
+        )
