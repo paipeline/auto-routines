@@ -433,6 +433,76 @@ archetypes:
          - `increment_signal: false` if you concluded the existing
            breakdown still matches the new goal (rare but possible).
 
+  - id: pr-review-bot
+    purpose: "Post inline review comments on open PRs: style, obvious bugs, security smells."
+    primitive: scheduled
+    category: reactive
+    trigger_default: "every 30 minutes"
+    automation_default: auto
+    self_evolve: false
+    success_criterion: "every open PR ≥ 6h old has at least one review comment from this routine"
+    stack_hints: [.github, CODEOWNERS, .eslintrc, ruff.toml, pyproject.toml]
+    prompt_body: |
+      Your job: act as a fast-feedback reviewer on open PRs. Read the
+      diff, drop **inline** review comments (line-anchored, not a
+      summary block) on the three axes the user asked for:
+
+        1. **Style** — naming, dead code, copy-paste, function length,
+           inconsistent patterns with the rest of the file/module.
+        2. **Obvious bugs** — null/None dereferences, off-by-one,
+           unhandled exceptions, missing await, wrong loop variable,
+           mutation of a function default arg, type confusion.
+        3. **Security smells** — SQL/shell concatenation, hard-coded
+           URLs that should be config, missing auth checks on a new
+           endpoint, unsafe deserialization (`eval`, `pickle.loads`,
+           `yaml.load` without `Loader=`).
+
+      Differs from `pr-ci-watcher` (only reacts to CI failures) and
+      `secret-scan` (only checks for credential leaks): this routine
+      reviews the diff *itself*. Stay out of merge gating — review
+      comments are advisory; don't request changes or block the PR.
+
+      Workflow:
+
+      1. List open PRs eligible for review:
+         `gh pr list --state open --limit 20 --json number,title,headRefOid,updatedAt`.
+         Read `.iteration/pr-review-bot-state.json` to skip PRs whose
+         `headRefOid` matches the last reviewed oid (no new commits).
+         Limit to ~5 PRs per fire — quality over breadth.
+      2. For each eligible PR:
+         a. Fetch the diff: `gh pr diff <number>` plus
+            `gh api repos/{owner}/{repo}/pulls/{number}/files`.
+         b. Walk the *added* lines. For each finding, record:
+            - file path
+            - line number (in the new file, not the diff hunk header)
+            - axis (style | bug | security)
+            - one-sentence message
+            - optional fix suggestion (single replacement line)
+         c. Cap at 8 comments per PR — more than that and the author
+            stops reading. Prioritize bug > security > style. Drop
+            duplicates of the same finding within 5 adjacent lines.
+         d. Post the comments via a single review request so they
+            land atomically:
+            `gh api repos/{owner}/{repo}/pulls/{number}/reviews
+             -f event=COMMENT
+             -f comments='[{"path":...,"line":...,"body":"..."}, ...]'`.
+            Do NOT use `--request-changes` — this is advisory review.
+      3. Update `.iteration/pr-review-bot-state.json` with the
+         reviewed oid per PR so the next fire only sees new commits.
+      4. If a PR has zero findings, post one summary comment "Reviewed
+         — no comments." so the author knows the routine ran. Cap at
+         once per PR head oid (don't re-post on every fire).
+      5. Log per-PR outcomes to `.iteration/log.jsonl`. Use
+         `increment_signal: true` when you posted any review comment
+         (including the zero-findings summary).
+
+      You do NOT branch or commit code from this routine — its real
+      work is inline review comments on the PR.
+
+      When in doubt about whether a finding is worth posting, **skip
+      it**. Silent acceptance of borderline cases beats nitpick noise
+      that trains the author to ignore the bot.
+
   - id: coverage-watcher
     purpose: "Watch project test coverage and open a fix PR when it drops below threshold."
     primitive: scheduled

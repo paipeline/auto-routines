@@ -157,7 +157,7 @@ def test_catalog_header_documents_category_field(catalog):
 
 # Archetypes whose "real work" is posting comments rather than branch+commit.
 # They still must log and use increment_signal.
-COMMENT_ONLY_ARCHETYPES = {"pr-ci-watcher", "secret-scan"}
+COMMENT_ONLY_ARCHETYPES = {"pr-ci-watcher", "secret-scan", "pr-review-bot"}
 
 
 @pytest.mark.parametrize(
@@ -342,6 +342,99 @@ def test_meta_evolve_replans_iteration_slices(catalog):
     assert "branch" in body and "commit" in body, (
         "meta-evolve must branch + commit the rewritten tasks — analysis-only "
         "is the failure mode the catalog exists to prevent"
+    )
+
+
+def test_pr_review_bot_archetype_exists_with_correct_shape(catalog):
+    """goal.md (Catalog quality): "Add a `pr-review-bot` archetype: posts
+    inline review comments on open PRs (style, obvious bugs, security
+    smells)."
+
+    Differs from `pr-ci-watcher` (which only reacts to CI failures) and
+    `secret-scan` (which only checks for credential leaks):
+    `pr-review-bot` reviews the diff *itself* for style/bugs/smells and
+    drops inline review comments on the lines that need attention.
+
+    Shape:
+      - scheduled (polls open PRs — no native PR webhook surface)
+      - reactive (responds to existing PR diffs)
+      - automation: auto (comments are advisory; safe to post without
+        a second approval step)
+      - self_evolve: false — review style should be stable so a bad
+        mid-run evolve can't silently dumb down the review
+    """
+    arch = next(
+        (a for a in catalog["archetypes"] if a["id"] == "pr-review-bot"),
+        None,
+    )
+    assert arch is not None, (
+        "pr-review-bot archetype is required (goal.md Catalog quality) — "
+        "without it, open PRs get no automated style/bug/smell review"
+    )
+    assert arch["primitive"] == "scheduled", (
+        f"pr-review-bot primitive must be scheduled (poll open PRs), "
+        f"got {arch['primitive']!r}"
+    )
+    assert arch.get("category") == "reactive", (
+        "pr-review-bot is reactive — it reads existing PR diffs, doesn't "
+        "drive new feature work"
+    )
+    assert arch["automation_default"] == "auto", (
+        "pr-review-bot must default to auto — review comments are advisory; "
+        "a notification step would just delay them"
+    )
+    assert arch["self_evolve"] is False, (
+        "pr-review-bot must NOT self_evolve — a bad mid-run evolve could "
+        "silently lower the review bar"
+    )
+
+
+def test_pr_review_bot_posts_inline_comments_not_just_summary(catalog):
+    """The whole point vs. a generic summary comment is *inline* review
+    comments: tied to specific lines so the author sees them in context.
+    The prompt body must reference inline / line-anchored comments
+    explicitly — bare 'leave a comment' would degrade to a summary."""
+    arch = next(
+        (a for a in catalog["archetypes"] if a["id"] == "pr-review-bot"),
+        None,
+    )
+    assert arch is not None, "pr-review-bot archetype required (see prior test)"
+    body = arch["prompt_body"].lower()
+    # Inline / line-anchored language
+    assert any(token in body for token in ["inline", "review comment", "line", "anchor"]), (
+        "pr-review-bot must mention inline / line-anchored comments — "
+        "summary-only comments are what pr-ci-watcher already does"
+    )
+    # Must use the actual gh API for inline review comments —
+    # `gh pr review --comment` and `gh api .../pulls/.../reviews` both
+    # exist; the prompt should name at least one so the routine knows
+    # how to actually post line-anchored feedback.
+    assert "gh pr review" in body or "gh api" in body, (
+        "pr-review-bot must name the gh CLI surface for posting inline "
+        "review comments (`gh pr review` / `gh api`)"
+    )
+
+
+def test_pr_review_bot_covers_required_review_axes(catalog):
+    """goal.md spells out three axes explicitly: 'style, obvious bugs,
+    security smells'. Pin each so the prompt can't quietly narrow to
+    one of them and call it done."""
+    arch = next(
+        (a for a in catalog["archetypes"] if a["id"] == "pr-review-bot"),
+        None,
+    )
+    assert arch is not None, "pr-review-bot archetype required (see prior test)"
+    body = arch["prompt_body"].lower()
+    assert "style" in body, (
+        "pr-review-bot must reference style review (one of the three "
+        "axes called out in goal.md)"
+    )
+    assert "bug" in body, (
+        "pr-review-bot must reference bug review (one of the three axes)"
+    )
+    assert any(token in body for token in ["security", "smell", "vuln"]), (
+        "pr-review-bot must reference security smells / vulnerabilities "
+        "(one of the three axes)"
     )
 
 
