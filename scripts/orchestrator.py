@@ -709,9 +709,13 @@ def _cli_budget(args, out, err) -> int:
         config["meta"]["cron"] = cron
         config["meta"]["human"] = human
 
-    # 3. Walk routines; rewrite the ones the preset names.
+    # 3. Walk routines; rewrite the ones the preset names. Capture the
+    # task_id + new cron for each so we can emit the MCP update plan
+    # for the SKILL.md follow-up step.
     routines = config.get("routines", []) or []
     touched: list[str] = []
+    plan_entries: list[dict[str, str]] = []
+    warnings: list[str] = []
     for routine in routines:
         rid = routine.get("id")
         if rid not in preset:
@@ -721,6 +725,27 @@ def _cli_budget(args, out, err) -> int:
         trigger["cron"] = cron
         trigger["human"] = human
         touched.append(rid)
+
+        # Plan emission. Routines lacking a stored `task_id` (hand-
+        # edited config, or pre-orchestrator install) get a warning
+        # rather than a silent skip — silently leaving the live MCP
+        # cron stale is the bug class the warning prevents.
+        task_id = routine.get("task_id")
+        if task_id:
+            plan_entries.append(
+                {
+                    "routine_id": rid,
+                    "task_id": task_id,
+                    "cron": cron,
+                    "human": human,
+                }
+            )
+        else:
+            warnings.append(
+                f"# warn: routine {rid!r} has no stored task_id — "
+                f"cannot emit update_scheduled_task plan line. "
+                f"Re-install or set task_id manually."
+            )
 
     # 4. Write back to disk. Use atomic-via-tempfile-and-rename so a
     # crash mid-write doesn't leave a half-rewritten config.
@@ -735,6 +760,17 @@ def _cli_budget(args, out, err) -> int:
         f"# touched routines: {touched or '(none — preset is empty)'}\n"
         f"# meta.cron updated: {bool(meta_preset)}\n"
     )
+
+    # 5. Emit the MCP update plan. One JSON object per line — stable,
+    # parseable, no ad-hoc string format for the LLM to misread. The
+    # marker line `mcp-plan:` separates the human summary above from
+    # the machine-parseable block below; SKILL.md `Mode: budget` keys
+    # off this marker.
+    out.write("mcp-plan:\n")
+    for w in warnings:
+        out.write(w + "\n")
+    for entry in plan_entries:
+        out.write(json.dumps(entry, sort_keys=True) + "\n")
     return 0
 
 

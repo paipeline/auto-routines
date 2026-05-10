@@ -783,6 +783,212 @@ class TestBudget:
 
 
 # ---------------------------------------------------------------------------
+# Budget command: MCP update plan emission
+# ---------------------------------------------------------------------------
+# PRD goal.md (Token frugality): "Add a `/auto-routines budget <tier>`
+# command that re-applies the cadence preset table to the live config
+# + scheduled tasks."
+#
+# The CLI already handles the config half. For the scheduled-tasks half,
+# the CLI emits an `mcp-plan:` block — one JSON line per touched
+# routine — listing the task_id and new cron the LLM caller must pass
+# to `mcp__scheduled-tasks__update_scheduled_task`. The CLI itself
+# can't call MCPs (no MCP surface from a python subprocess); the plan
+# turns the SKILL.md follow-up step from "scan config and figure out
+# what to update" into "iterate provided lines."
+
+class TestBudgetMcpPlan:
+    def _cfg(self, tmp_path, routines, meta_extra=None):
+        import yaml
+        cfg = _v4_config(routines)
+        if meta_extra:
+            cfg["meta"].update(meta_extra)
+        p = tmp_path / "config.yaml"
+        p.write_text(yaml.safe_dump(cfg))
+        return p
+
+    def _prd_with_task_id(self, task_id="tsk_prd_001"):
+        return {
+            "id": "prd-implement",
+            "state": "ACTIVE",
+            "primitive": "scheduled",
+            "trigger": {"cron": "0 */4 * * *", "human": "every 4 hours"},
+            "purpose": "drive PRD",
+            "automation_level": "auto",
+            "execution_surface": "local",
+            "est_minutes": 5,
+            "task_id": task_id,
+        }
+
+    def _digest_with_task_id(self, task_id="tsk_digest_002"):
+        return {
+            "id": "daily-digest",
+            "state": "ACTIVE",
+            "primitive": "scheduled",
+            "trigger": {"cron": "0 19 * * *", "human": "7:00 PM daily"},
+            "purpose": "digest",
+            "automation_level": "auto",
+            "execution_surface": "local",
+            "est_minutes": 3,
+            "task_id": task_id,
+        }
+
+    def test_plan_emits_one_line_per_touched_routine(self, orch, tmp_path):
+        """For each rewritten routine that has a stored `task_id`, the
+        CLI must emit a parseable plan line. Otherwise the SKILL.md
+        follow-up step has to scan the config itself — which is what
+        we're trying to remove."""
+        cfg = self._cfg(
+            tmp_path,
+            [self._prd_with_task_id(), self._digest_with_task_id()],
+        )
+        out = io.StringIO()
+        rc = orch.cli_main(
+            ["budget", "--config", str(cfg), "--tier", "medium"],
+            stdout=out,
+        )
+        assert rc == 0
+        text = out.getvalue()
+        assert "mcp-plan:" in text, (
+            "budget output must include an `mcp-plan:` block so the "
+            "SKILL.md Mode can iterate update_scheduled_task calls "
+            "without re-scanning the config"
+        )
+        # Both touched routines must appear (medium tier rewrites both
+        # prd-implement and daily-digest).
+        assert "prd-implement" in text
+        assert "daily-digest" in text
+
+    def test_plan_carries_task_id_and_new_cron(self, orch, tmp_path):
+        """Each plan line must carry the stored task_id AND the new
+        cron — the LLM step calls `update_scheduled_task(task_id, cron)`
+        verbatim from this line. If either field is missing the
+        follow-up step is back to scanning."""
+        cfg = self._cfg(
+            tmp_path,
+            [self._prd_with_task_id("tsk_prd_abc")],
+        )
+        out = io.StringIO()
+        rc = orch.cli_main(
+            ["budget", "--config", str(cfg), "--tier", "medium"],
+            stdout=out,
+        )
+        assert rc == 0
+        text = out.getvalue()
+        # Find the plan block. Lines inside it must be JSON-decodable
+        # so the LLM step doesn't have to do ad-hoc parsing.
+        assert "tsk_prd_abc" in text, (
+            "plan must include the stored task_id verbatim — without "
+            "it, the update_scheduled_task call has no target"
+        )
+        assert "0 */12 * * *" in text, (
+            "plan must include the new cron (medium / prd-implement = "
+            "every 12 hours) so the LLM doesn't have to re-derive it"
+        )
+
+    def test_plan_lines_are_machine_parseable(self, orch, tmp_path):
+        """The plan must be JSON per line — ad-hoc string formats are
+        the bug class this test exists to prevent."""
+        import json
+        cfg = self._cfg(
+            tmp_path,
+            [self._prd_with_task_id(), self._digest_with_task_id()],
+        )
+        out = io.StringIO()
+        rc = orch.cli_main(
+            ["budget", "--config", str(cfg), "--tier", "high"],
+            stdout=out,
+        )
+        assert rc == 0
+        text = out.getvalue()
+        # Extract lines between the `mcp-plan:` marker and either the
+        # next blank line, the next `#`-prefixed header line, or EOF.
+        lines = text.splitlines()
+        plan_idx = next(i for i, ln in enumerate(lines) if "mcp-plan:" in ln)
+        plan_lines = []
+        for ln in lines[plan_idx + 1:]:
+            s = ln.strip()
+            if not s:
+                break
+            if s.startswith("#"):
+                # Comment / warning lines inside the plan are allowed
+                # for warnings (e.g. routine missing task_id); skip.
+                continue
+            plan_lines.append(s)
+        assert plan_lines, "plan block must contain at least one entry"
+        # Each non-comment line must be a JSON object with at least
+        # `routine_id`, `task_id`, `cron` keys.
+        for s in plan_lines:
+            obj = json.loads(s)  # crashes if not JSON — that's the assertion
+            assert "routine_id" in obj
+            assert "task_id" in obj
+            assert "cron" in obj
+
+    def test_plan_warns_when_task_id_missing(self, orch, tmp_path):
+        """A routine in the preset but with no stored `task_id` (e.g.
+        a hand-edited config or a routine that hasn't been installed
+        via the orchestrator) must surface a warning line — silently
+        skipping it would leave a stale cron in the live MCP."""
+        prd = self._prd_with_task_id()
+        del prd["task_id"]  # simulate missing
+        cfg = self._cfg(tmp_path, [prd])
+        out = io.StringIO()
+        rc = orch.cli_main(
+            ["budget", "--config", str(cfg), "--tier", "medium"],
+            stdout=out,
+        )
+        assert rc == 0, (
+            "missing task_id is a warning, not a hard failure — the "
+            "config rewrite still succeeds"
+        )
+        text = out.getvalue().lower()
+        assert "prd-implement" in text and (
+            "warn" in text or "missing task_id" in text or "no task_id" in text
+        ), (
+            "budget output must warn when a touched routine has no "
+            "stored task_id — otherwise the LLM step silently leaves "
+            "the live MCP cron stale"
+        )
+
+    def test_plan_omits_routines_not_in_preset(self, orch, tmp_path):
+        """commit-tests is a git-hook routine and never in the preset
+        table. The plan must not list it — the MCP doesn't track
+        git-hook routines, and including them would prompt a spurious
+        update_scheduled_task call."""
+        # Include a scheduled routine the preset doesn't touch (a
+        # custom routine_id absent from BUDGET_PRESETS).
+        custom = {
+            "id": "custom-watcher",
+            "state": "ACTIVE",
+            "primitive": "scheduled",
+            "trigger": {"cron": "0 8 * * *", "human": "8 AM daily"},
+            "purpose": "custom",
+            "automation_level": "auto",
+            "execution_surface": "local",
+            "est_minutes": 2,
+            "task_id": "tsk_custom_x",
+        }
+        cfg = self._cfg(tmp_path, [self._prd_with_task_id(), custom])
+        out = io.StringIO()
+        rc = orch.cli_main(
+            ["budget", "--config", str(cfg), "--tier", "medium"],
+            stdout=out,
+        )
+        assert rc == 0
+        text = out.getvalue()
+        # custom-watcher must NOT appear in the plan (it's not in the
+        # preset, so its cron is untouched; emitting it would be a lie).
+        # The substring check is sufficient — if the id appears anywhere
+        # in the output, the plan is leaking it.
+        plan_section = text.split("mcp-plan:", 1)[1]
+        assert "custom-watcher" not in plan_section, (
+            "plan must not list routines outside the preset — "
+            "including them would prompt update_scheduled_task calls "
+            "with cron values the budget command never set"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Subprocess smoke — file is executable as `python scripts/orchestrator.py`
 # ---------------------------------------------------------------------------
 

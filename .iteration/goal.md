@@ -74,9 +74,13 @@ broken installs, or routines that drift back to "analyze only."
       Catalog should branch on `meta.budget`.
       Shipped as `scripts/daily-digest.sh` + `shell_variant:` catalog field.
       Pinned by `tests/test_daily_digest_shell.py` + `TestDailyDigestShellVariant`.
-- [ ] Add a `/auto-routines budget <tier>` command that re-applies the cadence
+- [x] Add a `/auto-routines budget <tier>` command that re-applies the cadence
       preset table to the live config + scheduled tasks. Lets the user dial up
       or down without re-running the full interview.
+      Shipped — `scripts/orchestrator.py budget` rewrites config.yaml (atomic)
+      AND emits an `mcp-plan:` block of JSON lines for the SKILL.md Mode to
+      hand to `mcp__scheduled-tasks__update_scheduled_task`. Pinned by
+      `TestBudget` (config) + `TestBudgetMcpPlan` (MCP plan emission).
 - [ ] Trim the per-routine SKILL.md preamble. The current rendered template
       is ~3KB of boilerplate per fire; extract the FSM/state-handling section
       into a single shared file the routine can `cat` once at start.

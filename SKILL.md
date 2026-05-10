@@ -535,10 +535,21 @@ below is its documentation, not a parallel definition. Tests in
 (meta.budget written, prd-implement cron rewritten per tier, unrelated
 routines byte-identical, unknown tier rejected with config untouched).
 
-After running `budget`, also call `update_scheduled_task` on each
-affected routine's stored `task_id` so the running scheduled tasks
-pick up the new cron. The CLI doesn't touch the MCP — it only edits
-config.
+After running `budget`, propagate the new crons to the live MCP. The
+CLI emits an `mcp-plan:` block in its stdout — one JSON object per
+line, each with `routine_id`, `task_id`, `cron`, `human`. For every
+line in that block, call:
+
+```
+mcp__scheduled-tasks__update_scheduled_task(task_id=<task_id>, schedule=<cron>)
+```
+
+Skip lines that start with `# warn:` — those flag routines whose
+stored `task_id` is missing (hand-edited config or pre-orchestrator
+install). For each warning line, surface it to the user and suggest
+re-running install for the affected routine. Do NOT scan the config
+yourself — the plan is the contract; scanning duplicates work the CLI
+already did and risks silent drift between config + MCP.
 
 ## Mode: `stop <routine_id>`
 
