@@ -57,6 +57,7 @@ Detect mode from the user's invocation:
 | `start <routine_id>`                       | `start` | Transition `STAGNANT|COMPLETED|STOPPED → ACTIVE`. Re-arm the task.        |
 | `revert <iter-NNN>`                        | `revert`| `git revert` back to the named checkpoint. Reconcile tasks afterwards.    |
 | `test-fire <routine_id>`                   | `test-fire` | Print the dispatch plan for one routine. Pure-script, no LLM tokens.  |
+| `budget <low\|medium\|high\|custom>`         | `budget`| Re-apply the cadence preset table to the live config. Pure-script, no LLM tokens. |
 
 ## Guardrails (apply to every mode)
 
@@ -462,6 +463,44 @@ No file analysis, no synthesis, no Claude tokens. Tests in
 `tests/test_orchestrator_cli.py::TestTestFire` pin the read-only
 contract: any change that mutates `.iteration/state.json` or
 `.iteration/log.jsonl` from the `test-fire` path breaks the suite.
+
+## Mode: `budget <tier>`
+
+**This mode does not spawn an LLM.** It re-applies the cadence preset
+table (see "Budget → cadence presets" below) to the live config without
+re-running the install interview. Tier is one of `low`, `medium`,
+`high`, or `custom` (no-op on crons; records the choice). Useful when
+the user wants to dial token spend up or down after install.
+
+```bash
+python3 scripts/orchestrator.py budget \
+    --config .iteration/config.yaml \
+    --tier <low|medium|high|custom>
+```
+
+What it does:
+
+- Reads `.iteration/config.yaml`, sets `meta.budget = <tier>`.
+- Rewrites the `cron` of every budget-sensitive routine
+  (`prd-implement`, `daily-digest`, `session-doc-drift`) to the
+  preset for that tier.
+- Updates `meta.cron` to the matching meta cadence.
+- Atomic write — writes to a sibling `.tmp` file and `os.replace`s,
+  so a crashed run never leaves a half-written config.
+- Unknown tier → non-zero exit, error to stderr, config unchanged
+  (byte-identical).
+
+The single source of truth for the mapping is `BUDGET_PRESETS` /
+`META_CRON_PRESETS` in `scripts/orchestrator.py` — the cadence table
+below is its documentation, not a parallel definition. Tests in
+`tests/test_orchestrator_cli.py::TestBudget` pin five invariants
+(meta.budget written, prd-implement cron rewritten per tier, unrelated
+routines byte-identical, unknown tier rejected with config untouched).
+
+After running `budget`, also call `update_scheduled_task` on each
+affected routine's stored `task_id` so the running scheduled tasks
+pick up the new cron. The CLI doesn't touch the MCP — it only edits
+config.
 
 ## Mode: `stop <routine_id>`
 

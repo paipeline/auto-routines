@@ -393,3 +393,82 @@ class TestModeTestFire:
             "Mode: test-fire must show the routine-id argument so the "
             "operator knows what to pass"
         )
+
+
+# ---------------------------------------------------------------------------
+# Skill UX: /auto-routines budget <tier> slash-command wrapper
+# ---------------------------------------------------------------------------
+# Same drift pattern as Mode: test-fire — PR #39 shipped the orchestrator
+# `budget` subcommand, but SKILL.md never wired it to a Mode. The
+# "Budget → cadence presets" prose at the bottom of SKILL.md describes
+# the mapping table but never tells the operator HOW to re-apply it
+# without re-running init. Without a Mode entry, `/auto-routines budget
+# medium` falls through to an LLM render and burns tokens on what is
+# already a pure-script command.
+
+class TestModeBudget:
+    def test_modes_table_lists_budget(self, skill_text):
+        """The Modes table at the top of SKILL.md is the operator's
+        entry index. Without a row here, `budget` is undiscoverable
+        even though the CLI subcommand exists."""
+        modes_start = skill_text.find("## Modes")
+        guardrails_start = skill_text.find("## Guardrails")
+        assert modes_start != -1 and guardrails_start != -1
+        modes_table = skill_text[modes_start:guardrails_start]
+        assert "`budget" in modes_table or "budget <tier>" in modes_table, (
+            "Modes table must list budget <tier> so the operator sees "
+            "it as a first-class mode, not an undocumented escape hatch"
+        )
+
+    def test_mode_budget_section_exists(self, skill_text):
+        """A dedicated `## Mode: budget <tier>` section must document
+        the command — its tier choices, what it rewrites, and the
+        no-LLM contract."""
+        assert (
+            "## Mode: `budget" in skill_text
+            or "## Mode: `budget <tier>`" in skill_text
+        ), "SKILL.md needs an explicit Mode: budget section"
+
+    def test_mode_budget_is_pure_script(self, skill_text):
+        """Same contract as Mode: status and Mode: test-fire — no LLM,
+        shells out to scripts/orchestrator.py budget. Re-applying the
+        cadence preset table is a deterministic config rewrite, not
+        an LLM task."""
+        mode_start = skill_text.find("## Mode: `budget")
+        if mode_start == -1:
+            # Section missing — caught by test_mode_budget_section_exists.
+            return
+        rest = skill_text[mode_start + 1 :]
+        next_mode = rest.find("\n## Mode")
+        next_section = rest.find("\n## ")
+        ends = [e for e in (next_mode, next_section) if e != -1]
+        section_end = min(ends) if ends else len(rest)
+        section = skill_text[mode_start : mode_start + 1 + section_end]
+        section_lower = section.lower()
+        assert (
+            "does not spawn" in section_lower
+            or "no llm" in section_lower
+            or "no claude tokens" in section_lower
+            or "pure-script" in section_lower
+            or "pure script" in section_lower
+        ), "Mode: budget must declare it's a no-LLM pure-script mode"
+        assert "scripts/orchestrator.py" in section, (
+            "Mode: budget must invoke scripts/orchestrator.py budget "
+            "(the CLI subcommand shipped in PR #39)"
+        )
+        # Tier vocabulary must appear so the operator knows their
+        # choices without re-reading the cadence-presets table.
+        assert "low" in section_lower
+        assert "medium" in section_lower
+        assert "high" in section_lower
+        # And cross-reference the existing test pin in
+        # tests/test_orchestrator_cli.py::TestBudget so changes that
+        # break the contract surface.
+        assert (
+            "TestBudget" in section
+            or "test_orchestrator_cli" in section
+            or "BUDGET_PRESETS" in section
+        ), (
+            "Mode: budget must cross-reference the existing test/code "
+            "pin so the contract has a backstop"
+        )
