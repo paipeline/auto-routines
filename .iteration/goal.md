@@ -39,14 +39,16 @@ broken installs, or routines that drift back to "analyze only."
       `.git/hooks/post-commit` (exists + executable when a git-hook
       routine is present, n/a otherwise). Emits JSONL on stdout, one
       record per check; exit 0 iff every check passes. Pinned by
-      `tests/test_install_doctor.py` (13 invariants across
+      `tests/test_install_doctor.py` (17 invariants across
       TestFullInstallPasses, TestMissingArtifacts, TestPlaceholderLeak,
-      TestPostCommitHook, TestOutputShape). The full
-      `init`-against-tmp-repo integration test that actually runs the
-      interview-driven install via Claude remains a separate slice —
-      it will compose this audit with a tmp-repo fixture + Claude
-      harness, but the assertion logic is now in place and testable
-      on its own.
+      TestPostCommitHook, TestOutputShape, TestModeDoctorWiring).
+      SKILL.md `Mode: doctor` exposes the wrapper to users as
+      `/auto-routines doctor` — drift-detected against future
+      moves/renames. The full `init`-against-tmp-repo integration
+      test that actually runs the interview-driven install via Claude
+      remains a separate slice — it will compose this audit with a
+      tmp-repo fixture + Claude harness, but the assertion logic is
+      now in place and reachable from the user surface.
 - [~] Add tests for the `evolve` flow — drain `evolve_requests.jsonl`, perform
       the FSM transitions, write a checkpoint, apply, verify.
       Partial: (a) drain half shipped as `scripts/orchestrator.py drain-evolve-requests`

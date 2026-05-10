@@ -551,6 +551,39 @@ No file analysis, no synthesis, no Claude tokens. Tests in
 contract: any change that mutates `.iteration/state.json` or
 `.iteration/log.jsonl` from the `test-fire` path breaks the suite.
 
+## Mode: `doctor`
+
+**This mode does not spawn an LLM.** It audits the current repo for
+a healthy auto-routines install — every artifact the install procedure
+is supposed to land (config, shared preamble, per-routine SKILL.md
+files with no `{{placeholders}}` leftover, executable post-commit hook
+when a git-hook routine is in config). Run the deterministic wrapper
+and print its output verbatim:
+
+```bash
+python3 scripts/orchestrator.py install-doctor \
+    --repo-root "$(git rev-parse --show-toplevel)"
+```
+
+Output is one JSON line per check on stdout (shape `{check, ok, detail}`).
+Exit code is `0` iff every check passes, `1` otherwise.
+
+When to use:
+- Immediately after `/auto-routines init` to confirm the install actually
+  landed — catches the PR #57 placeholder-leak failure mode (rendered
+  SKILL.md shipping with `{{routine_id}}` still in) and any missing
+  artifacts (config, preamble, post-commit hook for git-hook routines).
+- After `/auto-routines evolve` re-renders routine SKILLs to confirm no
+  artifact got dropped or corrupted in the rewrite.
+- From CI as a merge gate — pipe stdout to a check that asserts every
+  `ok: false` record is absent.
+
+No file analysis, no synthesis, no Claude tokens. Tests in
+`tests/test_install_doctor.py` pin both the audit logic (13 invariants)
+and this Mode's wiring (4 drift detectors): the Mode block exists,
+invokes `install-doctor`, passes `--repo-root`, and declares its
+LLM-free contract.
+
 ## Mode: `budget <tier>`
 
 **This mode does not spawn an LLM.** It re-applies the cadence preset

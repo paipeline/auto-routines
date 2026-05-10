@@ -387,3 +387,82 @@ class TestOutputShape:
         err = io.StringIO()
         rc = orch.cli_main(["install-doctor"], stdout=out, stderr=err)
         assert rc != 0, "argparse must reject missing --repo-root"
+
+
+# ---------------------------------------------------------------------------
+# SKILL.md `Mode: doctor` drift — the slash command must dispatch to the wrapper
+# ---------------------------------------------------------------------------
+
+
+class TestModeDoctorWiring:
+    """The subcommand from this slice is only useful if a user can
+    invoke it. SKILL.md must expose `/auto-routines doctor` as a
+    Mode that dispatches to `install-doctor`. These pins are drift
+    detectors — if someone moves the Mode or changes its name, the
+    install procedure ships an unreachable wrapper."""
+
+    SKILL_MD = ROOT / "SKILL.md"
+
+    def _doctor_mode_block(self) -> str:
+        """Return just the `## Mode: doctor` block — bounded by its
+        own header and the next `## Mode:` header — so a
+        `install-doctor` mention in some other section doesn't
+        accidentally satisfy the pin."""
+        import re
+        text = self.SKILL_MD.read_text()
+        m = re.search(r"^## Mode: `?doctor`?\s*$", text, re.M)
+        assert m, (
+            "SKILL.md must expose a `## Mode: doctor` section — "
+            "without it, the `install-doctor` subcommand is "
+            "unreachable from the user-facing slash command surface"
+        )
+        start = m.start()
+        nxt = re.search(r"^## Mode: ", text[m.end():], re.M)
+        end = m.end() + nxt.start() if nxt else len(text)
+        return text[start:end]
+
+    def test_mode_doctor_section_exists(self):
+        # Side-effect: _doctor_mode_block asserts existence.
+        block = self._doctor_mode_block()
+        assert block, "Mode: doctor block is empty"
+
+    def test_mode_doctor_invokes_install_doctor_subcommand(self):
+        block = self._doctor_mode_block()
+        assert "install-doctor" in block, (
+            "`Mode: doctor` block must invoke "
+            "`scripts/orchestrator.py install-doctor` — the wrapper "
+            "this Mode dispatches to. Without the subcommand name, "
+            "the LLM has nothing to run."
+        )
+
+    def test_mode_doctor_passes_repo_root(self):
+        """The wrapper REQUIRES --repo-root (no cwd fallback).
+        SKILL.md must show the user how to pass it — otherwise the
+        first invocation crashes with an argparse error."""
+        block = self._doctor_mode_block()
+        assert "--repo-root" in block, (
+            "`Mode: doctor` must show `--repo-root` in its invocation "
+            "— the wrapper has no cwd default, so an invocation "
+            "without this flag fails at argparse"
+        )
+
+    def test_mode_doctor_declares_pure_script_no_llm(self):
+        """Token-frugality discipline (PRD: 'Token frugality'): every
+        deterministic wrapper Mode must declare 'does not spawn an LLM'
+        so the install procedure's expected behavior is unambiguous.
+        Mirrors `Mode: status` / `Mode: test-fire` / `Mode: budget`
+        prose discipline."""
+        block = self._doctor_mode_block()
+        # Tolerate phrasing variations — just look for the canonical
+        # signal that LLM tokens aren't spent.
+        normalized = block.lower()
+        assert (
+            "does not spawn an llm" in normalized
+            or "no claude tokens" in normalized
+            or "pure-script" in normalized
+        ), (
+            "`Mode: doctor` must declare it does not spawn an LLM — "
+            "consistent with `Mode: status` / `Mode: test-fire` / "
+            "`Mode: budget`. Without this declaration, callers don't "
+            "know if invoking `/auto-routines doctor` costs tokens."
+        )
