@@ -267,3 +267,135 @@ def test_rendered_skill_substantively_smaller_than_old(
         f"rendered SKILL is {size} bytes — expected substantial reduction "
         f"from old baseline ~{OLD_BASELINE} bytes (target < 40%)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Side-effect entry point: main() against a fixture install
+# ---------------------------------------------------------------------------
+
+def _build_fixture_repo(tmp_path: Path) -> Path:
+    """Create a minimal repo layout the renderer's main() can run against.
+
+    Mirrors the structure SKILL.md install creates: templates/ + a
+    .iteration/config.yaml. Source templates are copied from the real
+    repo (we're testing the renderer, not the templates here)."""
+    (tmp_path / "templates").mkdir()
+    (tmp_path / ".iteration").mkdir()
+
+    # Copy templates from the real repo
+    for name in ("routine-skill.md", "routine-preamble.md", "routine-catalog.yaml"):
+        src = REPO_ROOT / "templates" / name
+        (tmp_path / "templates" / name).write_text(src.read_text())
+
+    # Minimal config: one routine using a known archetype
+    config = {
+        "schema_version": 3,
+        "iter_added": 1,
+        "meta": {"budget": "low", "stagnation_threshold": 5},
+        "routines": [
+            {
+                "id": "commit-tests",
+                "purpose": "Run tests after every commit.",
+                "primitive": "scheduled",
+                "iter_added": 1,
+                "automation_level": "auto",
+                "self_evolve": True,
+                "state": "ACTIVE",
+                "trigger": {"human": "after every commit", "cron": "*/15 * * * *"},
+                "success_criterion": "every commit on main has green tests",
+            },
+        ],
+    }
+    (tmp_path / ".iteration" / "config.yaml").write_text(yaml.safe_dump(config))
+    return tmp_path
+
+
+def test_main_writes_shared_preamble(renderer, tmp_path: Path) -> None:
+    """The renderer's main() must install _shared/preamble.md alongside
+    the per-routine SKILLs. PRD #10 step 6d."""
+    repo = _build_fixture_repo(tmp_path)
+    rc = renderer.main(repo_root=repo)
+    assert rc == 0
+
+    preamble_out = repo / ".claude" / "skills" / "_shared" / "preamble.md"
+    assert preamble_out.exists(), (
+        "main() must write .claude/skills/_shared/preamble.md"
+    )
+    content = preamble_out.read_text()
+    assert len(content.strip()) > 500
+    assert "{{" not in content and "}}" not in content
+    assert "## State handling" in content  # canonical section made it through
+
+
+def test_main_writes_per_routine_skill(renderer, tmp_path: Path) -> None:
+    repo = _build_fixture_repo(tmp_path)
+    renderer.main(repo_root=repo)
+
+    routine_out = repo / ".claude" / "skills" / "commit-tests" / "SKILL.md"
+    assert routine_out.exists()
+    content = routine_out.read_text()
+    assert "{{" not in content and "}}" not in content
+    assert "_shared/preamble.md" in content
+    assert "## State handling" not in content  # moved to preamble
+
+
+def test_main_is_idempotent(renderer, tmp_path: Path) -> None:
+    """Running main() twice must produce byte-identical output the second
+    time (modulo the installed_at timestamp). Re-rendering is the migration
+    path; if it's not idempotent we corrupt installs."""
+    repo = _build_fixture_repo(tmp_path)
+    renderer.main(repo_root=repo)
+    preamble_first = (repo / ".claude" / "skills" / "_shared" / "preamble.md").read_text()
+
+    renderer.main(repo_root=repo)
+    preamble_second = (repo / ".claude" / "skills" / "_shared" / "preamble.md").read_text()
+
+    assert preamble_first == preamble_second, (
+        "preamble must be byte-identical across runs — it has no timestamp"
+    )
+
+
+def test_main_fails_loudly_when_preamble_template_missing(
+    renderer, tmp_path: Path
+) -> None:
+    """If the preamble template is missing, install is incomplete. main()
+    must refuse rather than silently writing only per-routine SKILLs."""
+    repo = _build_fixture_repo(tmp_path)
+    (repo / "templates" / "routine-preamble.md").unlink()
+    with pytest.raises(SystemExit):
+        renderer.main(repo_root=repo)
+
+
+def test_main_fails_when_rendered_skill_exceeds_byte_budget(
+    renderer, tmp_path: Path
+) -> None:
+    """Byte-budget rule from PRD #10: if a rendered SKILL exceeds the
+    configured limit, main() must exit non-zero and not write the file.
+    Force this by setting an unrealistically tight limit."""
+    repo = _build_fixture_repo(tmp_path)
+    config_path = repo / ".iteration" / "config.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    config["meta"]["max_routine_skill_bytes"] = 100  # any real render busts this
+    config_path.write_text(yaml.safe_dump(config))
+
+    with pytest.raises(SystemExit):
+        renderer.main(repo_root=repo)
+    # The over-budget SKILL must NOT have been written.
+    assert not (repo / ".claude" / "skills" / "commit-tests" / "SKILL.md").exists()
+
+
+def test_main_per_routine_override_allows_larger_render(
+    renderer, tmp_path: Path
+) -> None:
+    """Per-routine `max_skill_bytes` overrides the meta default — the path
+    coordinator-style archetypes use to keep their decision tree."""
+    repo = _build_fixture_repo(tmp_path)
+    config_path = repo / ".iteration" / "config.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    config["meta"]["max_routine_skill_bytes"] = 100  # default would fail
+    config["routines"][0]["max_skill_bytes"] = 10000  # override allows the render
+    config_path.write_text(yaml.safe_dump(config))
+
+    rc = renderer.main(repo_root=repo)
+    assert rc == 0
+    assert (repo / ".claude" / "skills" / "commit-tests" / "SKILL.md").exists()

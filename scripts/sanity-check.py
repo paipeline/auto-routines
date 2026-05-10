@@ -85,6 +85,37 @@ def parse_yaml(text: str) -> dict:
     )
 
 
+def check_rendered_skill_size(
+    rendered_text: str,
+    limit: int,
+    routine_id: str,
+) -> list[str]:
+    """Post-render byte-budget check (PRD #10 Module 3, sanity-check rule).
+
+    The byte budget is on the *rendered artifact*, not the config — that's
+    why this is a separate function rather than part of `check()`. Called
+    by the renderer's main() before writing each per-routine SKILL.md.
+
+    Args:
+        rendered_text: the rendered SKILL.md content
+        limit: max bytes (UTF-8). Per-routine overrides take precedence
+               over meta.max_routine_skill_bytes; both default to 3000.
+        routine_id: for the error message
+
+    Returns:
+        Empty list if size is within budget; one-element list with a
+        descriptive error otherwise.
+    """
+    size = len(rendered_text.encode("utf-8"))
+    if size > limit:
+        return [
+            f"rendered SKILL.md for routine {routine_id!r} is {size} bytes, "
+            f"exceeds budget of {limit} bytes. "
+            f"Trim the prompt body or set routines[].max_skill_bytes to override."
+        ]
+    return []
+
+
 def cron_field_ok(field: str, lo: int, hi: int) -> bool:
     if field == "*":
         return True
@@ -203,6 +234,14 @@ def check(config: dict) -> list[str]:
             st = r["stagnation_threshold"]
             if not isinstance(st, int) or st < 1:
                 errors.append(f"{prefix} stagnation_threshold must be a positive integer")
+        # PRD #10: per-routine override of the byte budget (e.g. coordinator
+        # archetypes that legitimately need more space).
+        if "max_skill_bytes" in r:
+            mb = r["max_skill_bytes"]
+            if not isinstance(mb, int) or isinstance(mb, bool) or mb < 1:
+                errors.append(
+                    f"{prefix} max_skill_bytes must be a positive integer; got {mb!r}"
+                )
         # 6. trigger fields per primitive
         trig = r.get("trigger", {}) or {}
         # human-readable schedule must be present when cron is (schema 3+)
@@ -269,6 +308,16 @@ def check(config: dict) -> list[str]:
             f"This controls how often LLM-spawning routines fire — see SKILL.md "
             f"\"Budget → cadence presets\"."
         )
+    # PRD #10 Module 3: byte-budget rule for rendered per-routine SKILLs.
+    # The rule itself is enforced post-render (see check_rendered_skill_size);
+    # here we just validate the config-declared limits.
+    if "max_routine_skill_bytes" in meta:
+        v = meta["max_routine_skill_bytes"]
+        if not isinstance(v, int) or isinstance(v, bool) or v < 1:
+            errors.append(
+                f"meta.max_routine_skill_bytes must be a positive integer "
+                f"(default 3000); got {v!r}"
+            )
     if config.get("schema_version", 0) >= 3 and "human" not in meta:
         errors.append(
             "meta.human is required (schema 3+). e.g. '9:00 AM daily' to pair with meta.cron."

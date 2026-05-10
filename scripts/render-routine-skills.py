@@ -136,6 +136,23 @@ def _now_local_iso() -> str:
     return dt.datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+DEFAULT_MAX_ROUTINE_SKILL_BYTES = 3000
+
+
+def _import_sanity():
+    """Load scripts/sanity-check.py (the one beside this file) despite the
+    hyphen in its filename. Always uses the renderer's own scripts/ dir,
+    not the target repo — those should be the same in production but tests
+    pass a fixture repo as repo_root."""
+    import importlib.util
+    sibling = Path(__file__).resolve().parent / "sanity-check.py"
+    spec = importlib.util.spec_from_file_location("_sanity_for_renderer", sibling)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def main(repo_root: Optional[Path] = None) -> int:
     root = repo_root or ROOT
 
@@ -158,6 +175,10 @@ def main(repo_root: Optional[Path] = None) -> int:
     preamble_text = preamble_path.read_text()
 
     archetypes = {a["id"]: a for a in catalog["archetypes"]}
+    sanity = _import_sanity()
+    default_limit = (config.get("meta") or {}).get(
+        "max_routine_skill_bytes", DEFAULT_MAX_ROUTINE_SKILL_BYTES
+    )
 
     skills_dir = root / ".claude" / "skills"
     skills_dir.mkdir(parents=True, exist_ok=True)
@@ -187,6 +208,14 @@ def main(repo_root: Optional[Path] = None) -> int:
         )
         if "{{" in rendered or "}}" in rendered:
             sys.exit(f"unfilled placeholder in rendered SKILL for {rid!r}")
+
+        # Byte-budget enforcement: per-routine override > meta default > 3000.
+        limit = routine.get("max_skill_bytes", default_limit)
+        budget_errors = sanity.check_rendered_skill_size(rendered, limit, rid)
+        if budget_errors:
+            for e in budget_errors:
+                print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(1)
 
         out_dir = skills_dir / rid
         out_dir.mkdir(parents=True, exist_ok=True)

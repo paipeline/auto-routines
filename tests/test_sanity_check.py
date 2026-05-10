@@ -449,3 +449,96 @@ def test_meta_budget_optional(schema3_config):
 def test_meta_budget_constants_exposed():
     """SKILL.md and status.py reference these tiers — pin them."""
     assert sanity.BUDGET_TIERS == {"low", "medium", "high", "custom"}
+
+
+# ---------------------------------------------------------------------------
+# meta.max_routine_skill_bytes — the byte-budget rule (PRD #10 Module 3)
+# ---------------------------------------------------------------------------
+
+def test_meta_max_routine_skill_bytes_accepts_positive_int(schema3_config):
+    schema3_config["meta"]["max_routine_skill_bytes"] = 3000
+    assert sanity.check(schema3_config) == []
+
+
+def test_meta_max_routine_skill_bytes_rejects_zero(schema3_config):
+    schema3_config["meta"]["max_routine_skill_bytes"] = 0
+    errors = sanity.check(schema3_config)
+    assert any("max_routine_skill_bytes" in e for e in errors), errors
+
+
+def test_meta_max_routine_skill_bytes_rejects_negative(schema3_config):
+    schema3_config["meta"]["max_routine_skill_bytes"] = -1
+    errors = sanity.check(schema3_config)
+    assert any("max_routine_skill_bytes" in e for e in errors), errors
+
+
+def test_meta_max_routine_skill_bytes_rejects_non_int(schema3_config):
+    schema3_config["meta"]["max_routine_skill_bytes"] = "3000"
+    errors = sanity.check(schema3_config)
+    assert any("max_routine_skill_bytes" in e for e in errors), errors
+
+
+def test_meta_max_routine_skill_bytes_optional(schema3_config):
+    """Configs without it still validate — uses default 3000 at render time."""
+    schema3_config["meta"].pop("max_routine_skill_bytes", None)
+    assert sanity.check(schema3_config) == []
+
+
+def test_routine_max_skill_bytes_per_routine_override_accepted(schema3_config):
+    """Per-PRD #10: a deliberately larger archetype (coordinator) can opt out
+    via per-routine override."""
+    schema3_config["routines"][0]["max_skill_bytes"] = 6000
+    assert sanity.check(schema3_config) == []
+
+
+def test_routine_max_skill_bytes_must_be_positive_int(schema3_config):
+    schema3_config["routines"][0]["max_skill_bytes"] = 0
+    errors = sanity.check(schema3_config)
+    assert any("max_skill_bytes" in e for e in errors), errors
+
+
+# ---------------------------------------------------------------------------
+# check_rendered_skill_size — pure helper, used by renderer's main()
+# ---------------------------------------------------------------------------
+
+def test_check_rendered_skill_size_passes_under_budget():
+    """Default budget is 3000 bytes; a 1KB file passes."""
+    errors = sanity.check_rendered_skill_size(
+        rendered_text="x" * 1000,
+        limit=3000,
+        routine_id="commit-tests",
+    )
+    assert errors == []
+
+
+def test_check_rendered_skill_size_passes_at_exactly_budget():
+    """Boundary: equal to budget passes."""
+    errors = sanity.check_rendered_skill_size(
+        rendered_text="x" * 3000,
+        limit=3000,
+        routine_id="commit-tests",
+    )
+    assert errors == []
+
+
+def test_check_rendered_skill_size_fails_over_budget():
+    errors = sanity.check_rendered_skill_size(
+        rendered_text="x" * 3001,
+        limit=3000,
+        routine_id="commit-tests",
+    )
+    assert len(errors) == 1
+    assert "commit-tests" in errors[0]
+    assert "3001" in errors[0] and "3000" in errors[0]
+
+
+def test_check_rendered_skill_size_handles_unicode():
+    """UTF-8 multibyte characters: the limit is bytes, not chars."""
+    # "中" is 3 bytes in UTF-8. 1500 of them = 4500 bytes, over a 3000 limit.
+    errors = sanity.check_rendered_skill_size(
+        rendered_text="中" * 1500,
+        limit=3000,
+        routine_id="i18n-routine",
+    )
+    assert len(errors) == 1
+    assert "4500" in errors[0]
