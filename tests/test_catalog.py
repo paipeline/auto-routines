@@ -84,6 +84,77 @@ def test_archetype_prompt_body_is_substantive(catalog):
         assert "1." in body, f"{arch['id']} prompt_body missing numbered step 1"
 
 
+VALID_CATEGORIES = {"reactive", "forward-driving"}
+
+
+def test_every_archetype_has_category(catalog):
+    """PRD goal.md (catalog quality): the interview groups archetypes in
+    the candidate list as reactive (responds to events — commits, PRs,
+    file edits) vs. forward-driving (proactively proposes work — drives
+    a PRD/roadmap, scans for risk).
+
+    Without an explicit `category` on every archetype, the interview
+    can't group them sensibly and the user has no idea whether picking
+    `prd-implement` will *do* things on a schedule or `commit-tests`
+    will *react* to a commit.
+
+    Pin every archetype to one of the two categories now so the
+    interview consumer (when it lands) is unambiguous and so the
+    distinction is visible in the catalog source itself."""
+    for arch in catalog["archetypes"]:
+        cat = arch.get("category")
+        assert cat in VALID_CATEGORIES, (
+            f"archetype {arch['id']} has invalid/missing category={cat!r} "
+            f"(must be one of {sorted(VALID_CATEGORIES)})"
+        )
+
+
+def test_catalog_has_both_categories_represented(catalog):
+    """The whole point of the categorization is to *contrast* — a catalog
+    with only reactive archetypes (or only forward-driving) suggests the
+    field is being mis-applied. Pin that both buckets are non-empty so
+    we notice if a refactor accidentally collapses the distinction."""
+    seen = {arch.get("category") for arch in catalog["archetypes"]}
+    for required in VALID_CATEGORIES:
+        assert required in seen, (
+            f"no archetype declares category={required!r} — the "
+            "reactive/forward-driving distinction in the catalog header "
+            "becomes meaningless if one bucket is empty"
+        )
+
+
+def test_catalog_header_documents_category_field(catalog):
+    """The YAML header block enumerates each archetype field with a
+    one-liner so future contributors know what to fill in. If we add a
+    field to the schema but forget to document it in the header, the
+    next archetype author will skip it. Pin the header so the docs and
+    the schema can't drift apart."""
+    raw = CATALOG_PATH.read_text()
+    # Take the leading comment block (lines starting with `#`) only — we
+    # only want to assert against the documented field list, not the
+    # archetype bodies (which may legitimately mention `category:` in a
+    # comment somewhere).
+    header_lines = []
+    for line in raw.splitlines():
+        if line.startswith("#") or line.strip() == "":
+            header_lines.append(line)
+        else:
+            break
+    header = "\n".join(header_lines)
+    assert "category:" in header, (
+        "templates/routine-catalog.yaml header block must document the "
+        "`category:` field (one of reactive | forward-driving) so "
+        "archetype authors know to set it"
+    )
+    # The header should also explain what the values mean — bare field
+    # name with no explanation invites mis-categorization.
+    header_lower = header.lower()
+    assert "reactive" in header_lower and "forward-driving" in header_lower, (
+        "header must mention both `reactive` and `forward-driving` so the "
+        "distinction is visible at the top of the file"
+    )
+
+
 # Archetypes whose "real work" is posting comments rather than branch+commit.
 # They still must log and use increment_signal.
 COMMENT_ONLY_ARCHETYPES = {"pr-ci-watcher"}

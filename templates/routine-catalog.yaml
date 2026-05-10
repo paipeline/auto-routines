@@ -9,6 +9,18 @@
 #   id:                  default routine id (kebab-case)
 #   purpose:             one-line summary
 #   primitive:           hook | scheduled | git-hook | pr-poll | loop
+#   category:            reactive | forward-driving
+#                        - reactive:        responds to an event (commit, PR
+#                                           merge, file edit, session end,
+#                                           end-of-day timer). Maintenance
+#                                           lane.
+#                        - forward-driving: proactively pushes the project
+#                                           ahead (drives PRD/roadmap, audits
+#                                           deps, proposes upgrades). Progress
+#                                           lane.
+#                        The interview groups candidates by category so the
+#                        user picks "what should react?" and "what should
+#                        push forward?" separately.
 #   trigger_default:     human-readable schedule (mapped to cron at install)
 #   automation_default:  off | notify | suggest | auto
 #   self_evolve:         true|false — whether this archetype should fire mid-run evolve
@@ -27,6 +39,7 @@ archetypes:
   - id: prd-implement
     purpose: "On a schedule, pick the next unimplemented slice from the PRD/goal, design it, write code+tests, commit and open a PR."
     primitive: scheduled
+    category: forward-driving
     trigger_default: "every 4 hours"
     automation_default: auto
     self_evolve: true
@@ -100,6 +113,7 @@ archetypes:
   - id: commit-tests
     purpose: "Run the test suite after every commit; if anything fails, open a fix PR."
     primitive: git-hook
+    category: reactive
     trigger_default: "on every git commit"
     automation_default: auto
     self_evolve: false
@@ -183,6 +197,7 @@ archetypes:
   - id: commit-lint
     purpose: "Run linter+formatter after every commit; auto-fix and PR when violations exist."
     primitive: git-hook
+    category: reactive
     trigger_default: "on every git commit"
     automation_default: auto
     self_evolve: false
@@ -210,6 +225,7 @@ archetypes:
   - id: session-test-gap
     purpose: "After each Claude session, find untested new code and write the tests."
     primitive: hook
+    category: reactive
     trigger_default: "Stop hook (end of every Claude session)"
     automation_default: auto
     self_evolve: true
@@ -244,6 +260,7 @@ archetypes:
   - id: session-doc-drift
     purpose: "After each Claude session, update README/docs that diverge from the code."
     primitive: hook
+    category: reactive
     trigger_default: "Stop hook (end of every Claude session)"
     automation_default: auto
     self_evolve: true
@@ -276,6 +293,7 @@ archetypes:
   - id: pr-ci-watcher
     purpose: "Comment on open PRs when CI flips red, with the failing line and a fix proposal."
     primitive: scheduled
+    category: reactive
     trigger_default: "every 30 minutes"
     automation_default: auto
     self_evolve: true
@@ -305,6 +323,7 @@ archetypes:
   - id: daily-digest
     purpose: "Summarize today's commits and PRs into .iteration/digests/."
     primitive: scheduled
+    category: reactive
     trigger_default: "6:00 PM daily"
     automation_default: auto
     self_evolve: false
@@ -330,6 +349,7 @@ archetypes:
   - id: weekly-dep-audit
     purpose: "Audit dependencies for known vulnerabilities and outdated majors."
     primitive: scheduled
+    category: forward-driving
     trigger_default: "9:00 AM Mondays"
     automation_default: auto
     self_evolve: true
@@ -358,6 +378,7 @@ archetypes:
   - id: meta-evolve
     purpose: "When .iteration/goal.md changes, re-plan the iteration's task list and commit the new breakdown."
     primitive: git-hook
+    category: reactive
     trigger_default: "on every commit that touches .iteration/goal.md"
     automation_default: auto
     self_evolve: false
@@ -415,6 +436,7 @@ archetypes:
   - id: release-tag-checker
     purpose: "When a release commit goes in without a version bump, flag it."
     primitive: git-hook
+    category: reactive
     trigger_default: "on every git commit"
     automation_default: auto
     self_evolve: false
