@@ -20,3 +20,8 @@ node_modules/
 /.iteration/proposals/
 /.iteration/digests/
 /.claude/settings.local.json
+
+# Worktrees spawned by Claude Code's spawn_task / Task tool — these
+# are independent git repos checked out into the host repo; never
+# commit them.
+/.claude/worktrees/
