@@ -165,6 +165,39 @@ def test_commit_tests_has_relevance_gates(catalog):
     )
 
 
+def test_commit_tests_does_coverage_gap_fill(catalog):
+    """PRD #10 user story 8 + OQ5 resolution: when tests pass, the routine
+    must do the *value-add* over CI — find code paths the just-committed
+    diff exposed but didn't cover, and open a PR adding tests for them.
+
+    Without this, when the gates pass and tests are green, the routine
+    exits noop and the user gets no value from the run. CI already proves
+    green; this routine has to grow coverage to justify its minutes.
+
+    The prompt body must reference:
+      - Coverage measurement (e.g. pytest --cov, coverage diff, jest
+        --coverage), so the action is concrete.
+      - The gap-fill output: writing tests for uncovered paths exposed
+        in the diff, opening a PR (not just logging the gap).
+    """
+    arch = next(a for a in catalog["archetypes"] if a["id"] == "commit-tests")
+    body = arch["prompt_body"].lower()
+
+    # Must reference coverage tooling — not just "tests pass"
+    assert "coverage" in body, (
+        "commit-tests must reference coverage tooling (pytest --cov, "
+        "coverage, jest --coverage) — that's the value-add over CI's "
+        "plain pytest run (PRD #10 user story 8, OQ5)"
+    )
+
+    # Must instruct writing tests for uncovered paths in the diff
+    # (not just measuring or reporting the gap).
+    assert "uncovered" in body or "coverage gap" in body or "diff coverage" in body, (
+        "commit-tests must reference uncovered diff paths so the gap-fill "
+        "action is unambiguous (PRD #10 OQ5: scope to coverage-gap PRs)"
+    )
+
+
 def test_commit_tests_acknowledges_ci_overlap(catalog):
     """The prompt body must explicitly note that CI also runs tests on
     push, so future maintainers don't strip out the gates thinking they're

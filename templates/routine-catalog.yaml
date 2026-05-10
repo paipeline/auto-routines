@@ -135,7 +135,37 @@ archetypes:
       1. Detect the test runner from the repo (package.json scripts.test,
          pyproject.toml [tool.pytest], Cargo.toml, go.mod, Gemfile, etc.).
       2. Run it with a 5-minute timeout. Capture stdout+stderr.
-      3. If exit code is 0: log `outcome: ok, increment_signal: false` and exit.
+      3. If exit code is 0:
+         a. **Coverage-gap fill — the value-add over CI.** CI already proves
+            tests pass; this routine earns its minutes by closing diff
+            coverage gaps. Run the test suite with coverage measurement
+            (`pytest --cov=. --cov-report=term-missing`, `jest --coverage`,
+            `go test -cover`, `cargo tarpaulin`, etc.). Compare against
+            the just-committed diff: which lines added in HEAD are NOT
+            covered by any test? Use `git diff HEAD~1 HEAD --unified=0`
+            to enumerate the new lines, then intersect with the coverage
+            tool's missed-lines report.
+         b. If every new line is covered: log `outcome: ok,
+            increment_signal: false, summary: "diff fully covered"` and exit.
+         c. If there are uncovered new lines, pick the 1–3 most behavior-
+            critical functions touched (those with branches, side effects,
+            or external I/O — same heuristic as `session-test-gap`). Write
+            tests that exercise the happy path + one failure path. Match
+            the project's existing test style.
+         d. Run the new tests; iterate until green and the previously
+            uncovered lines are now covered.
+         e. Create branch `routines/commit-tests`, commit with message
+            `test: cover diff from <short SHA>` listing which functions
+            were newly tested.
+         f. Open a PR via `gh pr create --base <default branch>
+            --head routines/commit-tests --title 'test: cover diff from
+            <short SHA>' --body '<list of newly-tested functions, coverage
+            delta, link to triggering commit>'`.
+         g. Log `outcome: ok, increment_signal: true, summary: <PR url>`.
+         h. Hard cap: 15 minutes for the gap-fill phase. If you hit the
+            cap with partial coverage, commit what you have with a TODO
+            checklist in the PR body for the rest. Better partial than
+            nothing.
       4. If exit code is non-zero:
          a. Read the failing test output and the diff of the just-committed change
             (`git show HEAD --stat` and `git show HEAD -- <changed files>`).
