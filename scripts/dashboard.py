@@ -25,7 +25,12 @@ hand-written one.
 from __future__ import annotations
 
 import datetime as dt
-from typing import Any
+import json
+import re
+import subprocess
+import tempfile
+from pathlib import Path
+from typing import Any, Callable
 
 
 # Pinned marker — appears in every rendered dashboard body. Sync layer
@@ -215,3 +220,155 @@ def render_dashboard(
         ["", DASHBOARD_MARKER, ""],
     ]
     return "\n".join(line for chunk in chunks for line in chunk)
+
+
+# ---------------------------------------------------------------------------
+# sync_dashboard — wrap the renderer in `gh issue create/edit`
+# ---------------------------------------------------------------------------
+
+# The label gh-issue list returns when a title-search returns nothing —
+# we only ever look for the marker in the body, so title is incidental.
+_ISSUE_LIST_LIMIT = 200  # cap to keep `gh issue list` snappy on busy repos
+
+
+def default_gh_run(args: list[str]) -> str:
+    """Default `gh_run`: shell out to the `gh` CLI and return stdout.
+
+    Raises CalledProcessError on nonzero exit so callers can catch
+    auth / rate-limit failures explicitly. Prefix `gh` is implicit —
+    callers pass ['issue', 'list', '--repo', ...]."""
+    completed = subprocess.run(
+        ["gh", *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout
+
+
+def _find_dashboard_issue(
+    *,
+    repo: str,
+    gh_run: Callable[[list[str]], str],
+) -> dict | None:
+    """Return the existing dashboard issue (matching DASHBOARD_MARKER)
+    or None. Searches OPEN + CLOSED so we don't double-create after a
+    user closes the issue — we update the existing closed one in place."""
+    out = gh_run([
+        "issue", "list",
+        "--repo", repo,
+        "--state", "all",
+        "--limit", str(_ISSUE_LIST_LIMIT),
+        "--json", "number,title,url,body",
+    ])
+    try:
+        issues = json.loads(out) if out.strip() else []
+    except json.JSONDecodeError:
+        return None
+    for issue in issues:
+        body = issue.get("body") or ""
+        if DASHBOARD_MARKER in body:
+            return issue
+    return None
+
+
+def _issue_number_from_url(url: str) -> int | None:
+    m = re.search(r"/issues/(\d+)", url or "")
+    return int(m.group(1)) if m else None
+
+
+def sync_dashboard(
+    body: str,
+    *,
+    repo: str,
+    iter_n: int,
+    gh_run: Callable[[list[str]], str] | None = None,
+) -> dict:
+    """Push `body` to the living dashboard issue. Returns:
+
+        {action: "created"|"updated"|"unchanged",
+         issue_url: str|None,
+         issue_number: int|None}
+
+    Refuses to sync a body that doesn't contain DASHBOARD_MARKER (would
+    be unfindable on the next tick). Refuses empty `repo`.
+
+    Existing-issue resolution: looks for any open OR closed issue whose
+    BODY contains DASHBOARD_MARKER. Title is irrelevant — that's how we
+    avoid clobbering a hand-written issue that happens to have a similar
+    name.
+    """
+    if not body or DASHBOARD_MARKER not in body:
+        raise ValueError(
+            "sync_dashboard refuses to write a body without the dashboard "
+            f"marker {DASHBOARD_MARKER!r}. Use render_dashboard() to build it."
+        )
+    if not repo:
+        raise ValueError("sync_dashboard requires a non-empty repo (owner/name)")
+    if gh_run is None:
+        gh_run = default_gh_run
+
+    existing = _find_dashboard_issue(repo=repo, gh_run=gh_run)
+
+    if existing is None:
+        # Create — write body to a tempfile and pass --body-file so we
+        # don't have to worry about argv length limits or shell quoting.
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".md", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(body)
+            body_path = f.name
+        try:
+            url_out = gh_run([
+                "issue", "create",
+                "--repo", repo,
+                "--title", f"auto-routines dashboard — iter {iter_n}",
+                "--body-file", body_path,
+            ])
+        finally:
+            try:
+                Path(body_path).unlink()
+            except OSError:
+                pass
+        url = (url_out or "").strip().splitlines()[-1] if url_out.strip() else None
+        return {
+            "action": "created",
+            "issue_url": url,
+            "issue_number": _issue_number_from_url(url or ""),
+        }
+
+    # Existing dashboard found.
+    existing_body = existing.get("body") or ""
+    number = existing.get("number")
+    url = existing.get("url")
+    if existing_body == body:
+        # Save the user a notification — don't churn the timestamp.
+        return {
+            "action": "unchanged",
+            "issue_url": url,
+            "issue_number": number,
+        }
+
+    # Update. Pass body via tempfile for the same reason as create.
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".md", delete=False, encoding="utf-8"
+    ) as f:
+        f.write(body)
+        body_path = f.name
+    try:
+        gh_run([
+            "issue", "edit", str(number),
+            "--repo", repo,
+            "--body-file", body_path,
+        ])
+    finally:
+        try:
+            Path(body_path).unlink()
+        except OSError:
+            pass
+
+    return {
+        "action": "updated",
+        "issue_url": url,
+        "issue_number": number,
+    }
