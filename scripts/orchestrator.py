@@ -21,6 +21,7 @@ Design rules:
 from __future__ import annotations
 
 import datetime as dt
+import fnmatch
 import re
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -130,6 +131,27 @@ def is_firing_state(state: Any) -> bool:
 _KNOWN_TRIGGER_TYPES = frozenset({"cron", "hook", "git-hook", "manual"})
 
 
+def _path_filters_match(routine: dict, changed_files: list[str]) -> bool:
+    """True iff any of `routine["path_filters"]` (fnmatch globs) matches
+    any of `changed_files`. False if the routine declares no filters —
+    a routine without `path_filters` is "fires on everything", not
+    "fires on path matches", so it can't priority-elevate itself.
+
+    fnmatch semantics: `*` matches within a path segment but does NOT
+    cross `/`. Use `**` to span directories. Patterns are matched
+    against the literal path string, not normalized — callers should
+    pass repo-relative paths consistently.
+    """
+    filters = routine.get("path_filters") or []
+    if not filters:
+        return False
+    for pattern in filters:
+        for path in changed_files:
+            if fnmatch.fnmatch(path, pattern):
+                return True
+    return False
+
+
 def match_trigger(trigger: dict, routines: list[dict]) -> list[dict]:
     """Filter `routines` to the ones that should be considered for
     dispatch given this trigger. Returns a new list.
@@ -179,7 +201,26 @@ def match_trigger(trigger: dict, routines: list[dict]) -> list[dict]:
         ]
 
     if ttype == "git-hook":
-        return [r for r in routines if r.get("primitive") == "git-hook"]
+        git_hooks = [r for r in routines if r.get("primitive") == "git-hook"]
+        # PRD #10 priority rule 4: if the trigger reports the changed file
+        # set AND at least one git-hook routine declares a `path_filters`
+        # glob that matches one of those files, return ONLY the matching
+        # routines (priority short-circuit). The canonical case is
+        # `.iteration/goal.md` changed → meta-evolve fires alone, so
+        # cron-style commit-tests/commit-lint don't steal the slot.
+        #
+        # If `changed_files` is missing OR empty (ambiguous: nothing
+        # changed vs. trigger system couldn't compute), fall back to the
+        # legacy behavior of returning every git-hook routine. Same when
+        # no routine's filter matches — the catch-up routines still need
+        # to run on plain code commits.
+        changed_files = trigger.get("changed_files")
+        if not changed_files:
+            return git_hooks
+        prioritized = [
+            r for r in git_hooks if _path_filters_match(r, changed_files)
+        ]
+        return prioritized if prioritized else git_hooks
 
     # manual
     ids = trigger.get("routine_ids")
@@ -448,7 +489,20 @@ def _build_trigger(args: argparse.Namespace) -> dict:
     if t == "hook":
         return {"type": "hook", "hook_event": args.hook_event or ""}
     if t == "git-hook":
-        return {"type": "git-hook"}
+        # `--changed-files` is plumbed for PRD #10 priority rule 4. The
+        # caller (GHA workflow / local post-commit) computes the diff
+        # against the previous SHA and forwards a comma- or
+        # newline-separated list. Empty string → no info, legacy match.
+        raw = getattr(args, "changed_files", None) or ""
+        files = [
+            line.strip()
+            for line in raw.replace(",", "\n").splitlines()
+            if line.strip()
+        ]
+        trigger: dict = {"type": "git-hook"}
+        if files:
+            trigger["changed_files"] = files
+        return trigger
     if t == "manual":
         ids = [s.strip() for s in (args.routine_ids or "").split(",") if s.strip()]
         return {"type": "manual", "routine_ids": ids}
@@ -484,6 +538,17 @@ def _make_parser() -> argparse.ArgumentParser:
     tick_p.add_argument(
         "--routine-ids",
         help="Comma-separated ids, required when --trigger-type=manual",
+    )
+    tick_p.add_argument(
+        "--changed-files",
+        help=(
+            "Optional with --trigger-type=git-hook: comma- or "
+            "newline-separated repo-relative paths changed in the "
+            "triggering commit. When supplied, routines whose "
+            "`path_filters` glob matches any of these paths are "
+            "priority-selected (PRD #10 rule 4). When omitted/empty, "
+            "every git-hook routine fires (legacy behavior)."
+        ),
     )
     tick_p.add_argument(
         "--now",

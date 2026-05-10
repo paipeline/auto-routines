@@ -231,6 +231,122 @@ class TestTickHook:
         assert decisions[0]["surface"] == "local"  # hook is always local
 
 
+class TestTickGitHookChangedFiles:
+    """PRD #10 priority rule 4: the git-hook trigger accepts an optional
+    `--changed-files` flag that the GHA workflow / local post-commit hook
+    populates from the diff. When supplied, routines that subscribe to
+    matching paths via `path_filters` priority-elevate themselves —
+    ONLY they fire on this tick. This is what implements
+    `goal.md changed → meta-evolve fires alone`.
+    """
+
+    @staticmethod
+    def _git_hook_routine(rid: str, *, path_filters: list[str] | None = None) -> dict:
+        r = {
+            "id": rid,
+            "state": "ACTIVE",
+            "primitive": "git-hook",
+            "trigger": {},
+            "purpose": "test",
+            "automation_level": "auto",
+        }
+        if path_filters is not None:
+            r["path_filters"] = path_filters
+        return r
+
+    def test_changed_files_flag_priority_elevates_path_filtered_routine(
+        self, orch, tmp_path, state_path
+    ):
+        import yaml
+        cfg = _v4_config([
+            self._git_hook_routine("commit-tests"),
+            self._git_hook_routine("commit-lint"),
+            self._git_hook_routine(
+                "meta-evolve", path_filters=[".iteration/goal.md"]
+            ),
+        ])
+        cp = tmp_path / "c.yaml"
+        cp.write_text(yaml.safe_dump(cfg))
+        out = io.StringIO()
+        rc = orch.cli_main(
+            [
+                "tick",
+                "--config", str(cp),
+                "--state", str(state_path),
+                "--trigger-type", "git-hook",
+                "--changed-files", ".iteration/goal.md,scripts/orchestrator.py",
+                "--now", "2026-05-10T14:00:00+0000",
+            ],
+            stdout=out,
+        )
+        assert rc == 0
+        decisions = json.loads(out.getvalue())["decisions"]
+        assert [d["routine_id"] for d in decisions] == ["meta-evolve"]
+        assert decisions[0]["action"] == "fire"
+
+    def test_no_changed_files_flag_falls_back_to_all_git_hooks(
+        self, orch, tmp_path, state_path
+    ):
+        """Backward-compat: callers that don't supply --changed-files
+        still see every git-hook routine fire (legacy behavior)."""
+        import yaml
+        cfg = _v4_config([
+            self._git_hook_routine("commit-tests"),
+            self._git_hook_routine(
+                "meta-evolve", path_filters=[".iteration/goal.md"]
+            ),
+        ])
+        cp = tmp_path / "c.yaml"
+        cp.write_text(yaml.safe_dump(cfg))
+        out = io.StringIO()
+        rc = orch.cli_main(
+            [
+                "tick",
+                "--config", str(cp),
+                "--state", str(state_path),
+                "--trigger-type", "git-hook",
+                "--now", "2026-05-10T14:00:00+0000",
+            ],
+            stdout=out,
+        )
+        assert rc == 0
+        decisions = json.loads(out.getvalue())["decisions"]
+        assert {d["routine_id"] for d in decisions} == {
+            "commit-tests", "meta-evolve",
+        }
+
+    def test_changed_files_supports_newline_separator(
+        self, orch, tmp_path, state_path
+    ):
+        """The post-commit hook is more likely to pass `\\n`-separated
+        output (e.g. `git diff-tree --name-only HEAD`) than to join with
+        commas. Both shapes parse equivalently."""
+        import yaml
+        cfg = _v4_config([
+            self._git_hook_routine("commit-tests"),
+            self._git_hook_routine(
+                "meta-evolve", path_filters=[".iteration/goal.md"]
+            ),
+        ])
+        cp = tmp_path / "c.yaml"
+        cp.write_text(yaml.safe_dump(cfg))
+        out = io.StringIO()
+        rc = orch.cli_main(
+            [
+                "tick",
+                "--config", str(cp),
+                "--state", str(state_path),
+                "--trigger-type", "git-hook",
+                "--changed-files", ".iteration/goal.md\nREADME.md",
+                "--now", "2026-05-10T14:00:00+0000",
+            ],
+            stdout=out,
+        )
+        assert rc == 0
+        decisions = json.loads(out.getvalue())["decisions"]
+        assert [d["routine_id"] for d in decisions] == ["meta-evolve"]
+
+
 class TestTickManual:
     def test_manual_trigger_with_routine_ids(self, orch, tmp_path, state_path):
         import yaml

@@ -51,6 +51,7 @@ def make_routine(
     primitive: str,
     cron: str | None = None,
     event: str | None = None,
+    path_filters: list[str] | None = None,
 ) -> dict:
     trigger: dict = {}
     if cron is not None:
@@ -58,7 +59,7 @@ def make_routine(
         trigger["human"] = f"every cron {cron}"
     if event is not None:
         trigger["event"] = event
-    return {
+    routine = {
         "id": rid,
         "state": "ACTIVE",
         "primitive": primitive,
@@ -66,6 +67,9 @@ def make_routine(
         "purpose": "test",
         "automation_level": "auto",
     }
+    if path_filters is not None:
+        routine["path_filters"] = path_filters
+    return routine
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +176,136 @@ class TestGitHookTrigger:
         trigger = {"type": "git-hook"}
         out = orch.match_trigger(trigger, routines)
         assert [r["id"] for r in out] == ["a", "b"]
+
+
+class TestGitHookPathFilterPriority:
+    """PRD #10 priority rule 4: when the trigger reports `changed_files`
+    and at least one git-hook routine declares a `path_filters` glob that
+    matches one of those files, the matcher returns ONLY the matching
+    routines.
+
+    The canonical case is `goal.md` changing → `meta-evolve` fires alone,
+    so cron-driven catch-up routines don't steal the slot.
+    """
+
+    def test_path_filter_match_short_circuits_to_matching_routine(self, orch):
+        """When a routine's path_filters glob matches a changed file, that
+        routine is selected ALONE — other git-hook routines are dropped.
+        This is what implements the priority rule."""
+        routines = [
+            make_routine("commit-tests", primitive="git-hook"),
+            make_routine("commit-lint", primitive="git-hook"),
+            make_routine(
+                "meta-evolve",
+                primitive="git-hook",
+                path_filters=[".iteration/goal.md"],
+            ),
+        ]
+        trigger = {
+            "type": "git-hook",
+            "changed_files": [".iteration/goal.md", "scripts/orchestrator.py"],
+        }
+        out = orch.match_trigger(trigger, routines)
+        assert [r["id"] for r in out] == ["meta-evolve"]
+
+    def test_no_path_filter_match_falls_back_to_all_git_hooks(self, orch):
+        """If `changed_files` is supplied but no routine's path_filters
+        match any of them, behave like the legacy git-hook trigger:
+        return every git-hook routine. Catch-up commit-tests/commit-lint
+        still need to run on plain code commits."""
+        routines = [
+            make_routine("commit-tests", primitive="git-hook"),
+            make_routine("commit-lint", primitive="git-hook"),
+            make_routine(
+                "meta-evolve",
+                primitive="git-hook",
+                path_filters=[".iteration/goal.md"],
+            ),
+        ]
+        trigger = {
+            "type": "git-hook",
+            "changed_files": ["scripts/orchestrator.py", "README.md"],
+        }
+        out = orch.match_trigger(trigger, routines)
+        assert [r["id"] for r in out] == ["commit-tests", "commit-lint", "meta-evolve"]
+
+    def test_missing_changed_files_preserves_legacy_behavior(self, orch):
+        """The trigger system may not always know which files changed
+        (e.g. manual ticks). Without `changed_files` in the trigger dict,
+        path_filters are ignored and every git-hook routine matches."""
+        routines = [
+            make_routine("commit-tests", primitive="git-hook"),
+            make_routine(
+                "meta-evolve",
+                primitive="git-hook",
+                path_filters=[".iteration/goal.md"],
+            ),
+        ]
+        trigger = {"type": "git-hook"}
+        out = orch.match_trigger(trigger, routines)
+        assert [r["id"] for r in out] == ["commit-tests", "meta-evolve"]
+
+    def test_glob_pattern_matches_in_subdir(self, orch):
+        """path_filters supports fnmatch globs so a routine can subscribe
+        to e.g. `docs/**/*.md` without listing every file. We use
+        fnmatch.fnmatch semantics — `*` does NOT span path separators
+        unless the pattern uses `**`."""
+        routines = [
+            make_routine("commit-tests", primitive="git-hook"),
+            make_routine(
+                "session-doc-drift",
+                primitive="git-hook",
+                path_filters=["docs/*.md"],
+            ),
+        ]
+        trigger = {
+            "type": "git-hook",
+            "changed_files": ["docs/architecture.md"],
+        }
+        out = orch.match_trigger(trigger, routines)
+        assert [r["id"] for r in out] == ["session-doc-drift"]
+
+    def test_multiple_routines_can_match_same_path(self, orch):
+        """Two routines both subscribed to `.iteration/goal.md` both
+        return — the priority short-circuit drops only routines without
+        a matching filter, not other matching ones. tick() then
+        FCFS-allocates them against the GHA-minute cap."""
+        routines = [
+            make_routine(
+                "meta-evolve",
+                primitive="git-hook",
+                path_filters=[".iteration/goal.md"],
+            ),
+            make_routine(
+                "goal-notify",
+                primitive="git-hook",
+                path_filters=[".iteration/goal.md"],
+            ),
+            make_routine("commit-tests", primitive="git-hook"),
+        ]
+        trigger = {
+            "type": "git-hook",
+            "changed_files": [".iteration/goal.md"],
+        }
+        out = orch.match_trigger(trigger, routines)
+        assert [r["id"] for r in out] == ["meta-evolve", "goal-notify"]
+
+    def test_empty_changed_files_treated_as_unknown(self, orch):
+        """An empty list is ambiguous: did nothing change, or did we
+        just fail to compute the diff? Treat as unknown (== legacy
+        behavior, return all git-hook routines) so a buggy caller can't
+        starve catch-up routines forever."""
+        routines = [
+            make_routine("commit-tests", primitive="git-hook"),
+            make_routine(
+                "meta-evolve",
+                primitive="git-hook",
+                path_filters=[".iteration/goal.md"],
+            ),
+        ]
+        trigger = {"type": "git-hook", "changed_files": []}
+        out = orch.match_trigger(trigger, routines)
+        assert [r["id"] for r in out] == ["commit-tests", "meta-evolve"]
 
 
 # ---------------------------------------------------------------------------
