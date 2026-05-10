@@ -10,6 +10,8 @@ node_modules/
 # Track configuration + history; ignore ephemeral runtime artifacts.
 /.iteration/*
 !/.iteration/config.yaml
+# PRD #10 Module 5 — runtime ledger committed back by GHA after each tick
+!/.iteration/state.json
 !/.iteration/goal.md
 !/.iteration/history/
 !/.iteration/checkpoints.md
