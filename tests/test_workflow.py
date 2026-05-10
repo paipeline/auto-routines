@@ -103,6 +103,61 @@ class TestTriggers:
         assert "issues" in on
 
 
+class TestPullRequestMergeGate:
+    """PRD #10 user story 8 + dispatch priority rule 2: PR-MERGE events
+    fire commit-tests on the merged commit. Not every PR close is a merge —
+    a closed-without-merge PR has no diff to test, no SHA in main, no
+    coverage gap to fill. Firing the orchestrator on those wastes minutes
+    and produces noop ticks at best, confused dispatches at worst.
+
+    The workflow's 'Determine trigger' step must check
+    `github.event.pull_request.merged == true` before emitting a
+    git-hook trigger for pull_request events. Otherwise commit-tests
+    would re-run on every closed-without-merge PR.
+    """
+
+    def test_pull_request_step_gates_on_merged(self, wf_text):
+        """The shell step that derives trigger type for pull_request events
+        must reference `github.event.pull_request.merged` so closed-but-
+        not-merged PRs don't trigger downstream routines."""
+        assert "github.event.pull_request.merged" in wf_text, (
+            "PR-merge gate missing — workflow fires commit-tests on every "
+            "PR close, not just merges (PRD #10 user story 8)"
+        )
+
+    def test_pull_request_only_subscribes_to_closed(self, wf):
+        """We subscribe to `closed` (which fires on both merge and non-merge
+        close); the merge-vs-close discrimination happens inside the step.
+        This pin ensures we don't accidentally subscribe to `opened` /
+        `synchronize` / etc. which would fire commit-tests during PR
+        development — the exact noise the gates fixed in PR #24 prevent."""
+        # Same Norway-problem dance as TestTriggers.on — `on:` parses to True.
+        on = wf.get("on") or wf.get(True)
+        pr = on.get("pull_request") or {}
+        types = pr.get("types") or []
+        assert "closed" in types, "must subscribe to closed events"
+        # `opened`, `synchronize`, `reopened`, `edited` etc. would all be
+        # premature dispatches — closed is the only event that means
+        # "the change is settled."
+        for premature in ["opened", "synchronize", "reopened", "edited"]:
+            assert premature not in types, (
+                f"workflow should NOT fire on PR {premature!r} — that's "
+                "in-flight work, not a settled change"
+            )
+
+    def test_orchestrator_step_skips_when_trigger_is_skip(self, wf_text):
+        """When the gate decides skip (closed-no-merge PR), the orchestrator
+        tick step must not run — otherwise we waste a runner spin-up
+        executing nothing useful."""
+        # Look for a step-level `if:` that references trigger.outputs.type
+        # being not-equal-to 'skip'. Loose match — exact YAML formatting
+        # varies but the intent must be present.
+        assert "skip" in wf_text and "trigger.outputs.type" in wf_text, (
+            "missing skip-gate on the orchestrator tick step — "
+            "closed-without-merge PRs will still spin up the runner"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Job content — must call our CLIs
 # ---------------------------------------------------------------------------

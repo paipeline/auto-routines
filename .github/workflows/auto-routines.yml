@@ -122,6 +122,10 @@ jobs:
           ACTION: ${{ github.event.action }}
           ROUTINE_IDS: ${{ github.event.inputs.routine_ids }}
           CLIENT_PAYLOAD_TYPE: ${{ github.event.client_payload.trigger_type }}
+          # PRD #10 user story 8: only MERGED PRs should fire commit-tests.
+          # A closed-without-merge PR has no diff to test, no SHA on main,
+          # nothing to cover. Capture the merged flag and gate dispatch on it.
+          PR_MERGED: ${{ github.event.pull_request.merged }}
         run: |
           set -euo pipefail
           case "$EVENT_NAME" in
@@ -143,7 +147,17 @@ jobs:
               echo "type=${CLIENT_PAYLOAD_TYPE:-cron}" >> "$GITHUB_OUTPUT"
               echo "cron_expr=*/15 * * * *" >> "$GITHUB_OUTPUT"
               ;;
-            push|pull_request|issues)
+            pull_request)
+              # PRD #10 user story 8: only fire when the PR actually merged.
+              # github.event.pull_request.merged is the GH-provided boolean.
+              if [ "$PR_MERGED" = "true" ]; then
+                echo "type=git-hook" >> "$GITHUB_OUTPUT"
+              else
+                echo "::notice::PR closed without merge — skipping orchestrator dispatch"
+                echo "type=skip" >> "$GITHUB_OUTPUT"
+              fi
+              ;;
+            push|issues)
               # The orchestrator's git-hook primitive picks these up uniformly;
               # the actual decision (which routine, which SHA) happens in
               # tick() based on git log + open PRs/issues.
@@ -157,6 +171,9 @@ jobs:
 
       - name: Run orchestrator tick
         id: tick
+        # Short-circuit when the trigger step decided there's nothing to
+        # do (e.g. closed-without-merge PR — see PRD #10 user story 8).
+        if: steps.trigger.outputs.type != 'skip'
         run: |
           set -euo pipefail
           ARGS=(
