@@ -279,3 +279,184 @@ class TestSubprocessSmoke:
         )
         assert result.returncode == 0, result.stderr
         assert "scan" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Pure: build_fire_command — what subprocess do we exec for a fire?
+# ---------------------------------------------------------------------------
+
+class TestBuildFireCommand:
+    def test_basic_shape(self, poller):
+        """The command must invoke `claude` with a --skill flag pointing
+        at the routine id. Exact other flags can change; pin the contract
+        bits (binary + skill targeting)."""
+        cmd = poller.build_fire_command("session-doc-drift")
+        assert isinstance(cmd, list)
+        assert cmd[0] == "claude"
+        # --skill comes from Module 4's per-routine spawn
+        joined = " ".join(cmd)
+        assert "session-doc-drift" in joined
+        assert "--skill" in cmd
+
+    def test_uses_dangerously_skip_permissions(self, poller):
+        """Local fan-out is non-interactive; hook context can't answer
+        permission prompts. Skip-perms is the right tradeoff (the user
+        already trusted the routine when they enabled it in config)."""
+        cmd = poller.build_fire_command("session-doc-drift")
+        assert "--dangerously-skip-permissions" in cmd
+
+    def test_routine_id_passed_unchanged(self, poller):
+        """No quoting / mangling — kebab-case ids must round-trip
+        verbatim or the routine fails to load."""
+        cmd = poller.build_fire_command("daily-digest")
+        # Last positional should be the id (or whatever follows --skill)
+        i = cmd.index("--skill")
+        assert cmd[i + 1] == "daily-digest"
+
+
+# ---------------------------------------------------------------------------
+# fire subcommand — subprocess fan-out with injectable runner
+# ---------------------------------------------------------------------------
+
+class FakeRunner:
+    """Captures fire calls so tests can assert without spawning real
+    subprocesses. Returns whatever exit_codes were queued."""
+
+    def __init__(self, exit_codes=None):
+        self.calls = []
+        self._exit_codes = list(exit_codes or [])
+
+    def __call__(self, cmd, *, timeout=None):
+        self.calls.append({"cmd": cmd, "timeout": timeout})
+        return self._exit_codes.pop(0) if self._exit_codes else 0
+
+
+class TestFireSubcommand:
+    def test_fire_dispatches_each_pending_entry(self, poller, tmp_path):
+        """One pending entry → one subprocess. Two → two. The runner
+        callable is injected so we don't actually spawn `claude`."""
+        log = tmp_path / "log.jsonl"
+        log.write_text(
+            json.dumps({"event_id": 1, "routine_id": "session-doc-drift",
+                        "ts": "2026-05-10T17:03:00-0700", "sha": "x"}) + "\n"
+            + json.dumps({"event_id": 2, "routine_id": "daily-digest",
+                          "ts": "2026-05-10T17:04:00-0700", "sha": "y"}) + "\n"
+        )
+        runner = FakeRunner()
+        out, err = io.StringIO(), io.StringIO()
+        rc = poller.cli_main(
+            ["fire", "--log", str(log), "--watermark", "0"],
+            stdout=out, stderr=err, runner=runner,
+        )
+        assert rc == 0, err.getvalue()
+        assert len(runner.calls) == 2
+        ids = [c["cmd"][c["cmd"].index("--skill") + 1] for c in runner.calls]
+        assert ids == ["session-doc-drift", "daily-digest"]
+
+    def test_fire_skips_already_seen(self, poller, tmp_path):
+        """Watermark filters before fan-out — entries at or below it
+        don't fire."""
+        log = tmp_path / "log.jsonl"
+        log.write_text(
+            json.dumps({"event_id": 1, "routine_id": "a",
+                        "ts": "2026-05-10T17:03:00-0700", "sha": "x"}) + "\n"
+            + json.dumps({"event_id": 2, "routine_id": "b",
+                          "ts": "2026-05-10T17:04:00-0700", "sha": "y"}) + "\n"
+        )
+        runner = FakeRunner()
+        out, err = io.StringIO(), io.StringIO()
+        rc = poller.cli_main(
+            ["fire", "--log", str(log), "--watermark", "1"],
+            stdout=out, stderr=err, runner=runner,
+        )
+        assert rc == 0, err.getvalue()
+        assert len(runner.calls) == 1
+        assert runner.calls[0]["cmd"][runner.calls[0]["cmd"].index("--skill") + 1] == "b"
+
+    def test_fire_reports_outcomes_in_json(self, poller, tmp_path):
+        """Stdout payload must include each fire's outcome (rc) so the
+        Stop hook / operator can see what happened. Otherwise a silent
+        failure looks like success."""
+        log = tmp_path / "log.jsonl"
+        log.write_text(
+            json.dumps({"event_id": 1, "routine_id": "a",
+                        "ts": "2026-05-10T17:03:00-0700", "sha": "x"}) + "\n"
+            + json.dumps({"event_id": 2, "routine_id": "b",
+                          "ts": "2026-05-10T17:04:00-0700", "sha": "y"}) + "\n"
+        )
+        # First exits 0, second exits 7
+        runner = FakeRunner(exit_codes=[0, 7])
+        out, err = io.StringIO(), io.StringIO()
+        rc = poller.cli_main(
+            ["fire", "--log", str(log), "--watermark", "0"],
+            stdout=out, stderr=err, runner=runner,
+        )
+        # Top-level rc is non-zero because at least one fire failed
+        assert rc != 0, "rc must surface partial failure to the caller"
+        payload = json.loads(out.getvalue())
+        assert "fires" in payload
+        assert len(payload["fires"]) == 2
+        outcomes = {f["routine_id"]: f["exit_code"] for f in payload["fires"]}
+        assert outcomes == {"a": 0, "b": 7}
+
+    def test_fire_advances_next_watermark(self, poller, tmp_path):
+        """Even on partial failure, the watermark advances — otherwise we
+        infinitely retry a broken routine. Workflow will refire the
+        condition next tick if it still holds."""
+        log = tmp_path / "log.jsonl"
+        log.write_text(
+            json.dumps({"event_id": 5, "routine_id": "a",
+                        "ts": "2026-05-10T17:03:00-0700", "sha": "x"}) + "\n"
+        )
+        runner = FakeRunner(exit_codes=[1])  # failure
+        out, err = io.StringIO(), io.StringIO()
+        rc = poller.cli_main(
+            ["fire", "--log", str(log), "--watermark", "0"],
+            stdout=out, stderr=err, runner=runner,
+        )
+        payload = json.loads(out.getvalue())
+        assert payload["next_watermark"] == 5
+        assert rc != 0  # still surfaces the routine failure
+
+    def test_fire_no_pending_is_clean_exit(self, poller, tmp_path):
+        """No pending entries → exit 0, no subprocess, payload reports
+        zero fires. Hook firing on every Claude session must not noisy
+        up the transcript."""
+        log = tmp_path / "log.jsonl"
+        log.write_text(
+            json.dumps({"event_id": 1, "routine_id": "a",
+                        "ts": "2026-05-10T17:03:00-0700", "sha": "x"}) + "\n"
+        )
+        runner = FakeRunner()
+        out, err = io.StringIO(), io.StringIO()
+        rc = poller.cli_main(
+            ["fire", "--log", str(log), "--watermark", "1"],
+            stdout=out, stderr=err, runner=runner,
+        )
+        assert rc == 0
+        assert runner.calls == []
+        payload = json.loads(out.getvalue())
+        assert payload["fires"] == []
+        assert payload["next_watermark"] == 1
+
+    def test_fire_missing_log_is_clean_exit(self, poller, tmp_path):
+        """Same fresh-install case as scan — missing log means no fires
+        yet, not a hard error."""
+        runner = FakeRunner()
+        out, err = io.StringIO(), io.StringIO()
+        rc = poller.cli_main(
+            ["fire", "--log", str(tmp_path / "nope.jsonl"), "--watermark", "0"],
+            stdout=out, stderr=err, runner=runner,
+        )
+        assert rc == 0, err.getvalue()
+        assert runner.calls == []
+
+    def test_fire_default_runner_is_real_subprocess(self, poller):
+        """Sanity check: production callers don't pass a runner. The
+        default must be the real subprocess wrapper (otherwise nothing
+        would actually fire)."""
+        # We don't actually fire — just check the default exists and
+        # is callable. The wrapper module name should mention subprocess
+        # somewhere visible.
+        runner = poller._default_runner
+        assert callable(runner)

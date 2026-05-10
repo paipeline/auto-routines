@@ -62,8 +62,9 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 
 # Same kebab-case regex as state.py / sanity-check.py. Duplicated so this
@@ -161,6 +162,53 @@ def max_event_id(entries: list[dict], current: int) -> int:
     return max(current, max(e["event_id"] for e in entries))
 
 
+def build_fire_command(routine_id: str) -> list[str]:
+    """Build the subprocess arg list to dispatch one routine.
+
+    Pure: returns argv as a list, no execution. Caller decides how to
+    run it (real subprocess in production, fake callable in tests).
+
+    Mirrors the GHA dispatch step for consistency:
+        claude --headless --dangerously-skip-permissions --skill <rid>
+
+    --dangerously-skip-permissions: the Stop hook context can't answer
+    permission prompts. The user already trusted the routine when they
+    enabled it in config; refusing here would just deadlock."""
+    return [
+        "claude",
+        "--headless",
+        "--dangerously-skip-permissions",
+        "--skill",
+        routine_id,
+    ]
+
+
+# Type alias for the subprocess runner injected into fire mode. Returns
+# the exit code; takes the argv list and an optional timeout.
+Runner = Callable[..., int]
+
+
+def _default_runner(cmd: list[str], *, timeout: int | None = None) -> int:
+    """Production runner — real subprocess.run. Streams subprocess output
+    to the parent's stdio so the operator (or Stop hook transcript) can
+    see what the routine did."""
+    try:
+        result = subprocess.run(cmd, timeout=timeout)
+        return result.returncode
+    except FileNotFoundError:
+        # `claude` not on PATH — surface clearly. Don't crash the poller;
+        # let the cli_main loop continue + report it as a fire failure.
+        print(
+            f"local_poller: cannot exec {cmd[0]!r} — is Claude Code "
+            f"installed and on PATH?",
+            file=sys.stderr,
+        )
+        return 127  # standard "command not found" exit code
+    except subprocess.TimeoutExpired:
+        print(f"local_poller: {cmd[0]} timed out", file=sys.stderr)
+        return 124  # standard timeout exit code
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -187,8 +235,8 @@ def _make_parser() -> argparse.ArgumentParser:
 
     scan = sub.add_parser(
         "scan",
-        help="Read the dispatch log and report pending fires (dry-run "
-        "in this PR; subprocess fan-out lands in a follow-up).",
+        help="Read the dispatch log and report pending fires as JSON "
+        "to stdout. Read-only — no subprocess fan-out.",
     )
     scan.add_argument(
         "--log", required=True,
@@ -200,21 +248,48 @@ def _make_parser() -> argparse.ArgumentParser:
     )
     scan.add_argument(
         "--dry-run", action="store_true",
-        help="Emit pending fires as JSON to stdout; do nothing else. "
-        "Currently the only mode — non-dry-run lands in a follow-up PR.",
+        help="Kept for back-compat with phase-1 callers; scan is always "
+        "read-only so this flag is now a no-op.",
+    )
+
+    fire = sub.add_parser(
+        "fire",
+        help="Read the dispatch log + actually run pending fires via "
+        "`claude --skill <rid>` subprocesses. Emits outcomes as JSON.",
+    )
+    fire.add_argument(
+        "--log", required=True,
+        help="Path to .iteration/local_dispatches.jsonl",
+    )
+    fire.add_argument(
+        "--watermark", type=int, default=0,
+        help="Last event_id this poller already consumed (default: 0).",
+    )
+    fire.add_argument(
+        "--timeout", type=int, default=None,
+        help="Per-routine subprocess timeout in seconds (default: no "
+        "timeout — let the routine run to completion).",
     )
 
     return p
 
 
-def cli_main(argv: list[str], *, stdout=None, stderr=None) -> int:
+def cli_main(
+    argv: list[str],
+    *,
+    stdout=None,
+    stderr=None,
+    runner: Runner | None = None,
+) -> int:
     """Argparse-driven entry point. Returns an int exit code so __main__
-    can sys.exit on it. stdout/stderr are injectable for in-process
-    testing without subprocess overhead."""
+    can sys.exit on it. stdout/stderr/runner are injectable for
+    in-process testing without subprocess overhead."""
     if stdout is None:
         stdout = sys.stdout
     if stderr is None:
         stderr = sys.stderr
+    if runner is None:
+        runner = _default_runner
 
     parser = _make_parser()
     # Argparse calls sys.exit on --help / errors. Catch + return so
@@ -230,6 +305,8 @@ def cli_main(argv: list[str], *, stdout=None, stderr=None) -> int:
 
     if args.cmd == "scan":
         return _cmd_scan(args, stdout, stderr)
+    if args.cmd == "fire":
+        return _cmd_fire(args, stdout, stderr, runner)
 
     print(f"unknown subcommand: {args.cmd}", file=stderr)
     return 2
@@ -254,6 +331,45 @@ def _cmd_scan(args, stdout, stderr) -> int:
     json.dump(payload, stdout, indent=2)
     stdout.write("\n")
     return 0
+
+
+def _cmd_fire(args, stdout, stderr, runner: Runner) -> int:
+    """Read pending fires + dispatch each via runner. Returns 0 only if
+    every fire exits 0; otherwise the highest non-zero exit code so the
+    Stop hook surfaces the failure to the operator. Watermark advances
+    regardless of per-fire outcome (otherwise broken routines would
+    block all subsequent ones forever)."""
+    lines = _read_log_file(args.log)
+    try:
+        entries = parse_log_lines(lines)
+    except ValueError as e:
+        print(f"error parsing dispatch log: {e}", file=stderr)
+        return 1
+
+    pending = filter_new(entries, watermark=args.watermark)
+    next_watermark = max_event_id(entries, current=args.watermark)
+
+    fires: list[dict] = []
+    worst_rc = 0
+    for entry in pending:
+        cmd = build_fire_command(entry["routine_id"])
+        rc = runner(cmd, timeout=args.timeout)
+        fires.append({
+            "event_id": entry["event_id"],
+            "routine_id": entry["routine_id"],
+            "exit_code": rc,
+        })
+        if rc != 0:
+            worst_rc = max(worst_rc, rc)
+
+    payload = {
+        "fires": fires,
+        "next_watermark": next_watermark,
+        "log_path": args.log,
+    }
+    json.dump(payload, stdout, indent=2)
+    stdout.write("\n")
+    return worst_rc
 
 
 if __name__ == "__main__":
