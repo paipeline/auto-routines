@@ -1,0 +1,248 @@
+# auto-routines orchestrator (PRD #10 Module 4)
+#
+# This is the always-on execution surface. Every trigger funnels into a
+# single tick that:
+#   1. Asks orchestrator.py which routines (if any) should fire on this tick.
+#   2. Renders + syncs the living dashboard issue.
+#   3. Spawns headless Claude Code for each gha-surface routine the
+#      orchestrator picked.
+#   4. Commits any updated state.json back to main so the NEXT tick
+#      reads fresh state.
+#
+# Local-surface routines (hook, git-hook, loop) are NOT executed here —
+# they're emitted as repository_dispatch events the user's local Stop
+# hook consumes. That separation is what eliminates the dual-writer
+# race PRD #10 calls out.
+#
+# Kill switch: `gh workflow disable auto-routines.yml` from any clone.
+# (PRD #10 user story 29.)
+
+name: auto-routines tick
+
+on:
+  # Cron: every 15 minutes. The orchestrator's idle-window logic decides
+  # whether each candidate fires; the workflow's job is just to wake up.
+  schedule:
+    - cron: "*/15 * * * *"
+
+  # Manual tick — `gh workflow run auto-routines.yml` for debugging.
+  workflow_dispatch:
+    inputs:
+      routine_ids:
+        description: "Comma-separated routine ids to fire (empty = normal cron-style tick)"
+        required: false
+        default: ""
+
+  # Programmatic tick from local Stop hook or other clients.
+  repository_dispatch:
+    types: [auto-routines-tick]
+
+  # Push to main → fires commit-tests / commit-lint on the merged commit.
+  push:
+    branches: [main]
+
+  # PR-merge events fire commit-tests on the merged SHA.
+  pull_request:
+    types: [closed]
+
+  # `ready-for-agent` label triggers prd-implement.
+  issues:
+    types: [labeled]
+
+# Least privilege: only what the steps actually need.
+permissions:
+  contents: write       # state.json commit-back + git push
+  issues: write         # dashboard issue create/edit
+  pull-requests: read   # orchestrator reads PR snapshots
+
+# Don't pile up ticks. If a tick is mid-flight, queue at most one and
+# drop the rest — the next cron will pick up state from where this lands.
+concurrency:
+  group: auto-routines-tick
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    name: Orchestrator tick
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Need history so the orchestrator can read git log.
+          fetch-depth: 50
+          # Default GITHUB_TOKEN is fine for the commit-back step (we have
+          # contents: write above). Pinning explicitly so the intent is loud.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python deps
+        run: pip install pyyaml
+
+      # Translate the GH event into the orchestrator's trigger flags.
+      # Kept in shell so the YAML stays declarative + the logic is
+      # auditable in one place.
+      - name: Determine trigger
+        id: trigger
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          ROUTINE_IDS: ${{ github.event.inputs.routine_ids }}
+          CLIENT_PAYLOAD_TYPE: ${{ github.event.client_payload.trigger_type }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            schedule)
+              echo "type=cron" >> "$GITHUB_OUTPUT"
+              echo "cron_expr=*/15 * * * *" >> "$GITHUB_OUTPUT"
+              ;;
+            workflow_dispatch)
+              if [ -n "$ROUTINE_IDS" ]; then
+                echo "type=manual" >> "$GITHUB_OUTPUT"
+                echo "routine_ids=$ROUTINE_IDS" >> "$GITHUB_OUTPUT"
+              else
+                echo "type=cron" >> "$GITHUB_OUTPUT"
+                echo "cron_expr=*/15 * * * *" >> "$GITHUB_OUTPUT"
+              fi
+              ;;
+            repository_dispatch)
+              # Client payload may override; default to cron-style tick.
+              echo "type=${CLIENT_PAYLOAD_TYPE:-cron}" >> "$GITHUB_OUTPUT"
+              echo "cron_expr=*/15 * * * *" >> "$GITHUB_OUTPUT"
+              ;;
+            push|pull_request|issues)
+              # The orchestrator's git-hook primitive picks these up uniformly;
+              # the actual decision (which routine, which SHA) happens in
+              # tick() based on git log + open PRs/issues.
+              echo "type=git-hook" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::Unknown event: $EVENT_NAME"
+              exit 1
+              ;;
+          esac
+
+      - name: Run orchestrator tick
+        id: tick
+        run: |
+          set -euo pipefail
+          ARGS=(
+            tick
+            --config .iteration/config.yaml
+            --state .iteration/state.json
+            --trigger-type "${{ steps.trigger.outputs.type }}"
+          )
+          if [ -n "${{ steps.trigger.outputs.cron_expr }}" ]; then
+            ARGS+=(--cron-expr "${{ steps.trigger.outputs.cron_expr }}")
+          fi
+          if [ -n "${{ steps.trigger.outputs.routine_ids }}" ]; then
+            ARGS+=(--routine-ids "${{ steps.trigger.outputs.routine_ids }}")
+          fi
+          python scripts/orchestrator.py "${ARGS[@]}" > /tmp/decisions.json
+          echo "Decisions:"
+          cat /tmp/decisions.json
+          # Surface to subsequent steps (raw + a flag for whether anything fired).
+          {
+            echo 'decisions<<EOF'
+            cat /tmp/decisions.json
+            echo
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Sync dashboard
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Pull current iter from config; default to 1 if unset.
+          ITER=$(python -c "import yaml; print(yaml.safe_load(open('.iteration/config.yaml')).get('last_iter', 1))")
+          python scripts/dashboard.py sync \
+            --config .iteration/config.yaml \
+            --state .iteration/state.json \
+            --log .iteration/log.jsonl \
+            --repo "${{ github.repository }}" \
+            --iter "$ITER"
+
+      # Spawn headless Claude Code for each gha-surface routine the
+      # orchestrator decided to fire. Local-surface routines are skipped
+      # here — they get a repository_dispatch in the next step instead.
+      - name: Dispatch GHA-surface routines
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ ! -s /tmp/decisions.json ]; then
+            echo "No decisions to dispatch"
+            exit 0
+          fi
+          GHA_FIRES=$(python -c "
+          import json, sys
+          d = json.load(open('/tmp/decisions.json'))
+          for dec in d.get('decisions', []):
+              if dec.get('action') == 'fire' and dec.get('surface') == 'gha':
+                  print(dec['routine_id'])
+          ")
+          if [ -z "$GHA_FIRES" ]; then
+            echo "No gha-surface routines to fire this tick"
+            exit 0
+          fi
+          # Install Claude Code CLI on demand. Cache-this in a follow-up
+          # if the cold-install latency hurts.
+          npm install -g @anthropic-ai/claude-code
+          for RID in $GHA_FIRES; do
+            echo "::group::Dispatching $RID"
+            npx @anthropic-ai/claude-code --headless \
+              --dangerously-skip-permissions \
+              --skill "$RID" \
+              || echo "::warning::Routine $RID exited nonzero"
+            echo "::endgroup::"
+          done
+
+      # Emit repository_dispatch for local-surface routines so the user's
+      # local Stop hook (or polling client) picks them up.
+      - name: Emit local-routine dispatches
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ ! -s /tmp/decisions.json ]; then
+            exit 0
+          fi
+          LOCAL_FIRES=$(python -c "
+          import json
+          d = json.load(open('/tmp/decisions.json'))
+          for dec in d.get('decisions', []):
+              if dec.get('action') == 'fire' and dec.get('surface') == 'local':
+                  print(dec['routine_id'])
+          ")
+          for RID in $LOCAL_FIRES; do
+            echo "Emitting repository_dispatch for local routine $RID"
+            gh api "repos/${{ github.repository }}/dispatches" \
+              -X POST \
+              -f event_type=auto-routines-local-fire \
+              -F "client_payload[routine_id]=$RID" \
+              -F "client_payload[sha]=${{ github.sha }}" \
+              || echo "::warning::dispatch emit failed for $RID"
+          done
+
+      - name: Commit state.json back to main
+        if: github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          if git diff --quiet .iteration/state.json; then
+            echo "state.json unchanged — nothing to commit"
+            exit 0
+          fi
+          git config user.name "auto-routines[bot]"
+          git config user.email "auto-routines-bot@users.noreply.github.com"
+          git add .iteration/state.json
+          git commit -m "chore(state): tick $(date -u +%FT%TZ) [skip ci]"
+          # Retry once on push race (concurrent ticks shouldn't happen due
+          # to concurrency: group above, but defense-in-depth).
+          git push origin HEAD:main || (git pull --rebase origin main && git push origin HEAD:main)
