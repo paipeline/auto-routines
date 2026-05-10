@@ -20,17 +20,20 @@ broken installs, or routines that drift back to "analyze only."
       Partial: the "no `{{placeholders}}`" half shipped as
       `scripts/orchestrator.py render-routine-skill` — deterministic
       placeholder substitution (previously pure-LLM in SKILL.md install
-      step 6f). Looks up archetype by `routine.id` (config and catalog
+      step 6c). Looks up archetype by `routine.id` (config and catalog
       align by id; `prompt_skill` aliasing dropped — typos shouldn't
       silently route to the wrong archetype). Refuses to write if any
       `{{...}}` survives substitution; atomic write so a failed render
       leaves no partial file. Pinned by `tests/test_render_routine_skill.py`
-      (13 invariants across TestNoPlaceholdersAfterRender,
+      (16 invariants across TestNoPlaceholdersAfterRender,
       TestPlaceholderSources, TestInstalledAtTimestamp, TestSelfEvolveBlock,
-      TestErrorHandling, TestAtomicWrite). The full `init`-against-tmp-repo
-      integration test (post-commit hook, config sanity, full install
-      flow) remains a separate slice — needs a tmp-repo fixture + Claude
-      harness for the LLM-driven interview steps.
+      TestErrorHandling, TestAtomicWrite, TestInstallStep6cInvokesRenderWrapper).
+      SKILL.md install step 6c now invokes the wrapper directly (no
+      LLM-render fallback) — drift detector pinned in the new test
+      class. The full `init`-against-tmp-repo integration test
+      (post-commit hook, config sanity, full install flow) remains a
+      separate slice — needs a tmp-repo fixture + Claude harness for
+      the LLM-driven interview steps.
 - [~] Add tests for the `evolve` flow — drain `evolve_requests.jsonl`, perform
       the FSM transitions, write a checkpoint, apply, verify.
       Partial: (a) drain half shipped as `scripts/orchestrator.py drain-evolve-requests`

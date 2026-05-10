@@ -247,9 +247,17 @@ user is never staring at a silent terminal for more than a few seconds.
    **6c. Per-routine install** — for each routine in `config.yaml > routines[]`, dispatch on `routine.primitive`:
 
    - **`primitive: scheduled` or `primitive: pr-poll`:**
-     1. Read `templates/routine-skill.md`. Fill all `{{placeholders}}` (see "Placeholder semantics"). Use the archetype's `prompt_body` from the catalog as `{{routine_prompt_body}}` unless the user typed a custom prompt.
-     2. Write the filled file to `.claude/skills/<routine_id>/SKILL.md`.
-     3. Call `mcp__scheduled-tasks__create_scheduled_task` with:
+     1. Render the per-routine SKILL.md by invoking the deterministic substitution wrapper — DO NOT do this manually, the LLM fat-fingers placeholders:
+        ```bash
+        python3 scripts/orchestrator.py render-routine-skill \
+          --config .iteration/config.yaml \
+          --catalog "${CLAUDE_SKILL_DIR}/templates/routine-catalog.yaml" \
+          --template "${CLAUDE_SKILL_DIR}/templates/routine-skill.md" \
+          --routine "<routine_id>" \
+          --out ".claude/skills/<routine_id>/SKILL.md"
+        ```
+        The wrapper pulls `prompt_body` from the catalog (config is never the source — see "Placeholder semantics" §Placeholder sources), uses local-ISO `installed_at` (never UTC `Z`), and refuses to write if any `{{...}}` survives substitution. Pinned by `tests/test_render_routine_skill.py` (13 invariants).
+     2. Call `mcp__scheduled-tasks__create_scheduled_task` with:
         ```
         taskId: "auto-routines-<repo_slug>-<routine_id>"
         cronExpression: "<routine.trigger.cron>"
@@ -257,8 +265,8 @@ user is never staring at a silent terminal for more than a few seconds.
         description: "[auto-routines:<repo_slug>] <routine.purpose>"
         enabled: true
         ```
-     4. Capture the returned `taskId` and write it back to `config.yaml > routines[<i>].task_id`.
-     5. Transition `state: PROPOSED → ACTIVE` in config.yaml.
+     3. Capture the returned `taskId` and write it back to `config.yaml > routines[<i>].task_id`.
+     4. Transition `state: PROPOSED → ACTIVE` in config.yaml.
 
    - **`primitive: hook`** (Claude Code hook event like `Stop`, `PostToolUse`, `UserPromptSubmit`):
      1. Render the per-routine SKILL.md as above.

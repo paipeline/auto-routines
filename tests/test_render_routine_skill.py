@@ -395,6 +395,84 @@ class TestErrorHandling:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# SKILL.md install step 6c must invoke the wrapper, not LLM-render inline
+# ---------------------------------------------------------------------------
+
+
+class TestInstallStep6cInvokesRenderWrapper:
+    """The wrapper from this slice only enforces the `no
+    `{{placeholders}}`` guarantee if the install procedure actually
+    CALLS it. Without this wiring, the install path still hands the
+    rendering job to the LLM (which fat-fingers placeholders — the
+    original PRD failure mode).
+
+    These pins close the loop: step 6c MUST invoke
+    `orchestrator.py render-routine-skill` and MUST NOT instruct the
+    LLM to "Read templates/routine-skill.md. Fill all `{{placeholders}}`"
+    inline.
+    """
+
+    SKILL_MD = ROOT / "SKILL.md"
+
+    def _step_6c_block(self) -> str:
+        """Return just the step-6c block — bounded by `**6c.` start
+        and the next `**6` heading — so a `render-routine-skill`
+        mention in some OTHER section (e.g. a reference table) doesn't
+        accidentally satisfy the pin."""
+        text = self.SKILL_MD.read_text()
+        start = text.find("**6c.")
+        assert start != -1, "SKILL.md no longer has a `**6c.` install step"
+        # Find the next 6<letter>. step header after 6c.
+        m = re.search(r"\*\*6[d-z]\.", text[start + len("**6c."):])
+        assert m, "could not find next `**6X.` heading after 6c"
+        end = start + len("**6c.") + m.start()
+        return text[start:end]
+
+    def test_step_6c_invokes_render_routine_skill_subcommand(self):
+        """The wrapper's subcommand name must appear in step 6c's
+        per-routine install instructions — otherwise the install LLM
+        will keep doing it manually."""
+        block = self._step_6c_block()
+        assert "render-routine-skill" in block, (
+            "SKILL.md step 6c must invoke "
+            "`scripts/orchestrator.py render-routine-skill` (the "
+            "deterministic substitution wrapper). Without this wiring, "
+            "the install LLM falls back to manual placeholder "
+            "substitution — the original PRD failure mode "
+            "(`filled with no {{placeholders}}`)"
+        )
+
+    def test_step_6c_invocation_includes_required_flags(self):
+        """Pin the invocation shape. If the SKILL.md drops a required
+        flag, the wrapper errors at install time — better to catch the
+        drift here than at install."""
+        block = self._step_6c_block()
+        for flag in ("--config", "--catalog", "--template", "--routine", "--out"):
+            assert flag in block, (
+                f"SKILL.md step 6c invocation of render-routine-skill "
+                f"is missing the required flag `{flag}`. The wrapper "
+                f"requires all five — see "
+                f"`scripts/orchestrator.py render-routine-skill --help`"
+            )
+
+    def test_step_6c_no_longer_tells_llm_to_fill_placeholders(self):
+        """Drift detector: if someone re-introduces the manual prose
+        ("Fill all `{{placeholders}}`"), the LLM will follow whichever
+        instruction it reads first. Remove the fallback so there's
+        only one path."""
+        block = self._step_6c_block()
+        # Tolerate a mention of the WORD "placeholder" (e.g. in a
+        # reference comment), but not the imperative "Fill all
+        # {{placeholders}}" — that's the LLM-fallback instruction.
+        assert "Fill all `{{placeholders}}`" not in block, (
+            "SKILL.md step 6c still tells the LLM to manually fill "
+            "placeholders. This is the failure mode the wrapper was "
+            "supposed to eliminate. Replace the prose with a "
+            "`render-routine-skill` invocation."
+        )
+
+
 class TestAtomicWrite:
     def test_no_output_file_when_render_fails(self, orch, tmp_path):
         """When unknown placeholder is detected, the wrapper must NOT
