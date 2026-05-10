@@ -242,3 +242,73 @@ class TestCacheClaudeCli:
         """Caching is moot without a node runtime. Pin actions/setup-node
         so the version is reproducible (the runner default drifts)."""
         assert "actions/setup-node@v4" in wf_text
+
+
+# ---------------------------------------------------------------------------
+# Local dispatch log — append, don't POST to the void (OQ4 phase 2)
+# ---------------------------------------------------------------------------
+# repository_dispatch is write-only; the previous "Emit local-routine
+# dispatches" step POSTed to an unobservable surface. Replace with an
+# append-only event log (.iteration/local_dispatches.jsonl) the local
+# poller (scripts/local_poller.py) consumes via watermark.
+
+class TestLocalDispatchLog:
+    def test_no_repository_dispatch_post_for_local_fires(self, wf_text):
+        """The broken 'gh api .../dispatches POST event_type=auto-routines-
+        local-fire' lines must be gone. They emit into the void —
+        repository_dispatch has no GET endpoint."""
+        # The string only ever appeared inside the broken POST step. If
+        # it's still here, that step is still wired.
+        assert "auto-routines-local-fire" not in wf_text, (
+            "the local-fire dispatch POST should be replaced with an "
+            "append to .iteration/local_dispatches.jsonl"
+        )
+
+    def test_appends_to_local_dispatches_jsonl(self, wf_text):
+        """Workflow writes one JSON object per local fire to the event
+        log the poller reads."""
+        assert ".iteration/local_dispatches.jsonl" in wf_text
+
+    def test_log_uses_event_id_from_state(self, wf_text):
+        """event_id must be monotonic + unique. Source of truth is
+        state.json's last_event_id (already in the v1 state schema).
+        Otherwise the watermark contract breaks."""
+        # The shell that builds new entries should reference last_event_id
+        # in some form (either reading state.json or computing from it).
+        assert "last_event_id" in wf_text
+
+    def test_log_committed_back_with_state(self, wf_text):
+        """Same commit-back step that pushes state.json must also push
+        the dispatch log — otherwise the poller never sees new entries."""
+        # The 'Commit state.json back to main' step must `git add` the
+        # dispatch log as well.
+        # Look for the path appearing near a `git add` line.
+        lines = wf_text.splitlines()
+        for i, line in enumerate(lines):
+            if "git add" in line and ".iteration/local_dispatches.jsonl" in line:
+                return
+        # Or as a separate `git add` invocation in the same step.
+        # Loosest acceptable check: the path appears AND a `git add` line
+        # also references it OR a multi-arg add covers .iteration/ broadly.
+        for line in lines:
+            if "git add" in line and ".iteration/" in line and "*" in line:
+                return
+        pytest.fail(
+            "commit-back step must `git add .iteration/local_dispatches.jsonl` "
+            "(or an equivalent glob) so new fires reach origin/main"
+        )
+
+    def test_log_timestamp_uses_offset_not_z(self, wf_text):
+        """Poller's parse_log_lines rejects UTC `Z` — the workflow must
+        write `+0000` (or any explicit ±HHMM) for the timestamp to be
+        accepted."""
+        # We look for the workflow shell using `date -u +%FT%T+0000` or
+        # equivalent format string. The existing commit message uses
+        # `date -u +%FT%TZ` which is FINE for a commit message but would
+        # be wrong for the log entries.
+        # Just pin: when generating dispatch ts, the format string ends
+        # in something other than `Z`.
+        assert "+0000" in wf_text or "+%z" in wf_text, (
+            "dispatch log entries need an explicit ±HHMM offset; the "
+            "poller rejects UTC 'Z' per state.py / SKILL.md"
+        )

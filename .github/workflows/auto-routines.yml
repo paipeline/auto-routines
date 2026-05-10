@@ -236,45 +236,82 @@ jobs:
             echo "::endgroup::"
           done
 
-      # Emit repository_dispatch for local-surface routines so the user's
-      # local Stop hook (or polling client) picks them up.
-      - name: Emit local-routine dispatches
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Append local-surface fires to .iteration/local_dispatches.jsonl —
+      # the event log scripts/local_poller.py reads with a watermark.
+      #
+      # Why an append-only log instead of repository_dispatch POST:
+      # GitHub's repository_dispatch API is write-only — there's no GET
+      # endpoint, so any local consumer is blind to past events. We use
+      # a committed-back JSONL file as the queue surface instead.
+      # event_id comes from state.json.last_event_id (incremented per
+      # entry) so the watermark contract holds.
+      - name: Append local-routine fires to dispatch log
         run: |
           set -euo pipefail
           if [ ! -s /tmp/decisions.json ]; then
+            echo "No decisions to log"
             exit 0
           fi
-          LOCAL_FIRES=$(python -c "
-          import json
-          d = json.load(open('/tmp/decisions.json'))
-          for dec in d.get('decisions', []):
-              if dec.get('action') == 'fire' and dec.get('surface') == 'local':
-                  print(dec['routine_id'])
-          ")
-          for RID in $LOCAL_FIRES; do
-            echo "Emitting repository_dispatch for local routine $RID"
-            gh api "repos/${{ github.repository }}/dispatches" \
-              -X POST \
-              -f event_type=auto-routines-local-fire \
-              -F "client_payload[routine_id]=$RID" \
-              -F "client_payload[sha]=${{ github.sha }}" \
-              || echo "::warning::dispatch emit failed for $RID"
-          done
+          python <<'PY'
+          import json, pathlib, datetime as dt
 
-      - name: Commit state.json back to main
+          decisions_path = pathlib.Path("/tmp/decisions.json")
+          state_path = pathlib.Path(".iteration/state.json")
+          log_path = pathlib.Path(".iteration/local_dispatches.jsonl")
+          sha = "${{ github.sha }}"
+
+          decisions = json.loads(decisions_path.read_text()).get("decisions", [])
+          local_fires = [
+              d["routine_id"] for d in decisions
+              if d.get("action") == "fire" and d.get("surface") == "local"
+          ]
+          if not local_fires:
+              print("No local-surface routines to log this tick")
+              raise SystemExit(0)
+
+          state = json.loads(state_path.read_text())
+          last_event_id = int(state.get("last_event_id", 0))
+
+          # Use UTC with explicit +0000 offset — poller's parser rejects
+          # the bare `Z` suffix (logs are read on the user's local
+          # machine; explicit offset survives the round trip).
+          now = dt.datetime.now(dt.timezone.utc)
+          ts = now.strftime("%Y-%m-%dT%H:%M:%S+0000")
+
+          log_path.parent.mkdir(parents=True, exist_ok=True)
+          with log_path.open("a", encoding="utf-8") as f:
+              for rid in local_fires:
+                  last_event_id += 1
+                  entry = {
+                      "event_id": last_event_id,
+                      "routine_id": rid,
+                      "ts": ts,
+                      "sha": sha,
+                  }
+                  f.write(json.dumps(entry) + "\n")
+                  print(f"logged event_id={last_event_id} routine_id={rid}")
+
+          # Persist the new last_event_id so the next tick picks up
+          # where we left off. Re-write atomically: tmpfile + rename.
+          state["last_event_id"] = last_event_id
+          tmp = state_path.with_suffix(state_path.suffix + ".tmp")
+          tmp.write_text(json.dumps(state, indent=2) + "\n")
+          tmp.replace(state_path)
+          PY
+
+      - name: Commit state.json + dispatch log back to main
         if: github.ref == 'refs/heads/main'
         run: |
           set -euo pipefail
-          if git diff --quiet .iteration/state.json; then
-            echo "state.json unchanged — nothing to commit"
+          # Stage both runtime artifacts; if neither changed we exit clean.
+          git add -- .iteration/state.json .iteration/local_dispatches.jsonl 2>/dev/null || true
+          if git diff --cached --quiet -- .iteration/state.json .iteration/local_dispatches.jsonl; then
+            echo "state.json + dispatch log unchanged — nothing to commit"
             exit 0
           fi
           git config user.name "auto-routines[bot]"
           git config user.email "auto-routines-bot@users.noreply.github.com"
-          git add .iteration/state.json
           git commit -m "chore(state): tick $(date -u +%FT%TZ) [skip ci]"
-          # Retry once on push race (concurrent ticks shouldn't happen due
-          # to concurrency: group above, but defense-in-depth).
+          # Retry once on push race (concurrency: group above should
+          # prevent this, but defense-in-depth).
           git push origin HEAD:main || (git pull --rebase origin main && git push origin HEAD:main)
