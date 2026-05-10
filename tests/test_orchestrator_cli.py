@@ -527,6 +527,115 @@ class TestCliErrors:
 
 
 # ---------------------------------------------------------------------------
+# test-fire — manual one-shot dispatch plan for a single routine
+#
+# goal.md (Skill UX): "/auto-routines test-fire <routine_id> to manually
+# fire one routine without waiting for cron — useful for debugging."
+#
+# Surface: a dry-run subcommand that takes a routine id, validates it, and
+# prints the dispatch command the user (or the SKILL.md slash-command
+# wrapper) can copy-paste or pipe to a shell. NO state writes (it's a
+# manual override, not a real fire). NO subprocess execution (out of
+# scope for v1 — the user runs the printed command if they want).
+# ---------------------------------------------------------------------------
+
+class TestTestFire:
+    def _cfg_with_routines(self, tmp_path, routines):
+        import yaml
+        cfg = _v4_config(routines)
+        p = tmp_path / "config.yaml"
+        p.write_text(yaml.safe_dump(cfg))
+        return p
+
+    def test_subcommand_prints_dispatch_plan_for_known_routine(
+        self, orch, tmp_path
+    ):
+        cfg = self._cfg_with_routines(tmp_path, [_scheduled_routine(rid="r1")])
+        out = io.StringIO()
+        rc = orch.cli_main(
+            ["test-fire", "--config", str(cfg), "--routine-id", "r1"],
+            stdout=out,
+        )
+        assert rc == 0, "test-fire on a known routine must succeed"
+        text = out.getvalue()
+        # The plan must name the routine so the user knows what was matched.
+        assert "r1" in text
+        # The plan must show the dispatch command the user would run —
+        # mirrors the post-commit-hook substitution shape so test-fire
+        # output and a real local fire stay congruent.
+        assert "claude" in text.lower(), (
+            "dispatch plan must include the `claude` invocation so the "
+            "user sees what would actually run"
+        )
+        assert "/r1" in text or "-p \"/r1\"" in text or "-p '/r1'" in text, (
+            "dispatch plan must show the slash-command shape (`/<routine_id>`) "
+            "so test-fire output mirrors the real dispatch"
+        )
+
+    def test_subcommand_errors_on_unknown_routine(self, orch, tmp_path):
+        cfg = self._cfg_with_routines(tmp_path, [_scheduled_routine(rid="r1")])
+        err = io.StringIO()
+        rc = orch.cli_main(
+            ["test-fire", "--config", str(cfg), "--routine-id", "does-not-exist"],
+            stdout=io.StringIO(),
+            stderr=err,
+        )
+        assert rc != 0, (
+            "test-fire on a missing id must fail loudly — silent success "
+            "would let typos go unnoticed"
+        )
+        assert "does-not-exist" in err.getvalue(), (
+            "the error message must name the bad id so the user can fix the typo"
+        )
+
+    def test_subcommand_does_not_mutate_state(self, orch, tmp_path):
+        """test-fire is a manual-override dry-run: it must NOT write to
+        state.json. Otherwise running test-fire eats the cost cap, ticks
+        last_event_id, and pollutes last_dispatch — corrupting the real
+        orchestrator's accounting."""
+        cfg = self._cfg_with_routines(tmp_path, [_scheduled_routine(rid="r1")])
+        state_path = tmp_path / "state.json"
+        before = json.dumps(_v1_state())
+        state_path.write_text(before)
+        rc = orch.cli_main(
+            ["test-fire", "--config", str(cfg), "--routine-id", "r1"],
+            stdout=io.StringIO(),
+        )
+        assert rc == 0
+        # state file untouched (test-fire takes no --state flag at all,
+        # but if a future patch tries to wire one in, this still pins
+        # the contract: existing state on disk is unchanged).
+        assert state_path.read_text() == before, (
+            "test-fire must be read-only — state on disk must be byte-identical"
+        )
+
+    def test_subcommand_warns_on_stopped_routine_but_still_emits_plan(
+        self, orch, tmp_path
+    ):
+        """A user explicitly typing `test-fire <id>` is asking to fire it
+        even if it's STOPPED — that's the whole point of a manual debug
+        switch. Don't silently refuse; print the plan and warn so the
+        user sees the state mismatch."""
+        stopped = _scheduled_routine(rid="r1")
+        stopped["state"] = "STOPPED"
+        cfg = self._cfg_with_routines(tmp_path, [stopped])
+        out = io.StringIO()
+        err = io.StringIO()
+        rc = orch.cli_main(
+            ["test-fire", "--config", str(cfg), "--routine-id", "r1"],
+            stdout=out,
+            stderr=err,
+        )
+        assert rc == 0, "test-fire on STOPPED must still succeed (manual override)"
+        assert "r1" in out.getvalue(), "plan must still mention the routine"
+        # Warning goes to stderr so the plan on stdout stays pipeable.
+        warn = err.getvalue().lower()
+        assert "stopped" in warn or "warn" in warn or "not active" in warn, (
+            "stderr must call out the STOPPED state so the user notices"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Subprocess smoke — file is executable as `python scripts/orchestrator.py`
 # ---------------------------------------------------------------------------
 

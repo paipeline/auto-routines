@@ -557,7 +557,89 @@ def _make_parser() -> argparse.ArgumentParser:
             "UTC `Z` refused). Defaults to the configured idle_window_tz now."
         ),
     )
+
+    # test-fire: manual one-shot dispatch plan for a single routine.
+    # Read-only — does not touch state.json. Used by `/auto-routines
+    # test-fire <id>` for debugging without waiting for cron.
+    fire_p = sub.add_parser(
+        "test-fire",
+        help="Print the dispatch plan for one routine (debugging override).",
+        description=(
+            "Read the config, find the routine by id, and print the "
+            "dispatch command shape (`claude --dangerously-skip-permissions "
+            "-p \"/<routine_id>\"`) the user can copy-paste or pipe to a "
+            "shell. Pure dry-run: NO state mutation, NO subprocess "
+            "execution. Warns on STOPPED routines but still emits the plan "
+            "(test-fire is a manual override)."
+        ),
+    )
+    fire_p.add_argument("--config", required=True, help="Path to .iteration/config.yaml")
+    fire_p.add_argument(
+        "--routine-id", required=True,
+        help="Routine id to fire (must exist in config.yaml routines list).",
+    )
     return p
+
+
+def _cli_test_fire(args, out, err) -> int:
+    """Manual one-shot dispatch plan for `/auto-routines test-fire <id>`.
+
+    Read-only: no state.json touch, no subprocess execution. Just prints
+    the dispatch command the user can copy-paste so they can fire one
+    routine without waiting for cron. STOPPED routines warn but still
+    emit a plan (this is a manual override — silent refusal would be
+    worse than a noisy warning)."""
+    try:
+        config = _load_yaml(args.config)
+    except (OSError, Exception) as e:
+        print(f"config load failed: {e}", file=err)
+        return 1
+
+    routines = (config or {}).get("routines", []) or []
+    match = next((r for r in routines if r.get("id") == args.routine_id), None)
+    if match is None:
+        known = ", ".join(r.get("id", "?") for r in routines) or "(none)"
+        print(
+            f"unknown routine id: {args.routine_id!r} "
+            f"(known routines: {known})",
+            file=err,
+        )
+        return 1
+
+    state = match.get("state", "?")
+    if state not in FIRING_STATES:
+        # Manual override: warn but proceed.
+        print(
+            f"warning: routine {args.routine_id!r} is in state "
+            f"{state!r} (not in FIRING_STATES={sorted(FIRING_STATES)}). "
+            "test-fire is a manual override, so the plan below would still "
+            "run if executed — but it would not fire on a real trigger.",
+            file=err,
+        )
+
+    primitive = match.get("primitive", "?")
+    surface = match.get("execution_surface") or "local"
+    automation = match.get("automation_level", "?")
+    purpose = match.get("purpose", "")
+
+    # Mirror the post-commit-hook dispatch shape so test-fire output and
+    # a real local fire stay congruent. The slash-command form (`/<id>`)
+    # is what the SKILL.md per-routine file responds to.
+    cmd = f'claude --dangerously-skip-permissions -p "/{args.routine_id}"'
+
+    lines = [
+        f"# test-fire dispatch plan for routine: {args.routine_id}",
+        f"#   primitive:   {primitive}",
+        f"#   state:       {state}",
+        f"#   surface:     {surface}",
+        f"#   automation:  {automation}",
+        f"#   purpose:     {purpose}",
+        "#",
+        "# Run this command to fire the routine now (or pipe to bash):",
+        cmd,
+    ]
+    out.write("\n".join(lines) + "\n")
+    return 0
 
 
 def cli_main(
@@ -581,6 +663,9 @@ def cli_main(
         # argparse calls sys.exit on error; absorb so callers get a code
         # rather than a crash. argparse already wrote to stderr.
         return int(e.code) if e.code is not None else 2
+
+    if args.command == "test-fire":
+        return _cli_test_fire(args, out, err)
 
     if args.command != "tick":
         print(f"unknown command: {args.command}", file=err)
