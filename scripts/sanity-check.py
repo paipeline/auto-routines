@@ -41,6 +41,14 @@ try:
 except ImportError:
     yaml = None
 
+try:
+    # Python 3.9+ stdlib — needed to validate meta.idle_window_tz against
+    # the system tz database (no third-party dep, the SKILL stays portable).
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+except ImportError:  # pragma: no cover — Python ≤ 3.8 not supported by this skill
+    ZoneInfo = None  # type: ignore[assignment]
+    ZoneInfoNotFoundError = Exception  # type: ignore[assignment,misc]
+
 
 KEBAB = re.compile(r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
 PRIMITIVES = {"hook", "scheduled", "loop", "pr-poll", "git-hook"}
@@ -48,6 +56,14 @@ LEVELS = {"off", "notify", "suggest", "auto"}
 MODES = {"goal-driven", "fully-auto"}
 GH_VALUES = {"required", "optional", "none"}
 BUDGET_TIERS = {"low", "medium", "high", "custom"}
+# Schema 4 — every scheduled/pr-poll routine fires on exactly one surface.
+# 'both' was rejected during PRD #10 review (it created a dual-writer race
+# on state.json). Hook and git-hook routines run inside the user's session
+# and don't need this field.
+EXECUTION_SURFACES = {"gha", "local"}
+# Schema 4 — idle_window can be a clock range or the literal "always".
+IDLE_WINDOW_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$")
+SURFACE_REQUIRING_PRIMITIVES = {"scheduled", "pr-poll"}
 HOOK_EVENTS = {
     "PreToolUse", "PostToolUse", "Notification", "Stop", "SubagentStop",
     "UserPromptSubmit", "PreCompact", "SessionStart", "SessionEnd",
@@ -83,6 +99,32 @@ def parse_yaml(text: str) -> dict:
         "PyYAML not installed. Run `pip install pyyaml` (or use a venv). "
         "sanity-check requires it to validate config.yaml."
     )
+
+
+def idle_window_ok(value) -> bool:
+    """An idle_window is either the string 'always' (never idle — work any
+    time) or a clock range 'HH:MM-HH:MM' (24-hour, may wrap midnight).
+    Other types or malformed strings are rejected."""
+    if not isinstance(value, str):
+        return False
+    if value == "always":
+        return True
+    return bool(IDLE_WINDOW_RE.match(value))
+
+
+def iana_tz_ok(value) -> bool:
+    """Validate against the system tz database. PRD #10 review specifically
+    flagged silent UTC fallback as a footgun — we require an IANA name so
+    the orchestrator's idle-window math is unambiguous."""
+    if not isinstance(value, str) or not value:
+        return False
+    if ZoneInfo is None:  # pragma: no cover — Python ≤ 3.8
+        return False
+    try:
+        ZoneInfo(value)
+    except (ZoneInfoNotFoundError, ValueError):
+        return False
+    return True
 
 
 def cron_field_ok(field: str, lo: int, hi: int) -> bool:
@@ -203,6 +245,29 @@ def check(config: dict) -> list[str]:
             st = r["stagnation_threshold"]
             if not isinstance(st, int) or st < 1:
                 errors.append(f"{prefix} stagnation_threshold must be a positive integer")
+        # execution_surface (schema 4+): which surface this routine fires on.
+        # Only scheduled/pr-poll need it — hook/git-hook always run in-session.
+        if "execution_surface" in r:
+            es = r["execution_surface"]
+            if not isinstance(es, str) or es not in EXECUTION_SURFACES:
+                errors.append(
+                    f"{prefix} execution_surface must be one of "
+                    f"{sorted(EXECUTION_SURFACES)}, got {es!r}"
+                )
+        elif (
+            config.get("schema_version", 0) >= 4
+            and prim in SURFACE_REQUIRING_PRIMITIVES
+        ):
+            errors.append(
+                f"{prefix} missing key: execution_surface "
+                f"(required from schema_version 4 for primitive {prim!r})"
+            )
+        # est_minutes (schema 4+): orchestrator projects this against
+        # meta.gha_minutes_cap before dispatching.
+        if "est_minutes" in r:
+            em = r["est_minutes"]
+            if not isinstance(em, int) or isinstance(em, bool) or em < 1:
+                errors.append(f"{prefix} est_minutes must be a positive integer")
         # 6. trigger fields per primitive
         trig = r.get("trigger", {}) or {}
         # human-readable schedule must be present when cron is (schema 3+)
@@ -273,6 +338,39 @@ def check(config: dict) -> list[str]:
         errors.append(
             "meta.human is required (schema 3+). e.g. '9:00 AM daily' to pair with meta.cron."
         )
+
+    # Schema 4 — adaptive responsiveness + GHA cost ceiling
+    schema_v = config.get("schema_version", 0)
+    if "idle_window" in meta:
+        if not idle_window_ok(meta["idle_window"]):
+            errors.append(
+                f"meta.idle_window must be 'always' or 'HH:MM-HH:MM' (24h), "
+                f"got {meta['idle_window']!r}"
+            )
+    elif schema_v >= 4:
+        errors.append(
+            "meta.idle_window is required (schema 4+). Use 'HH:MM-HH:MM' "
+            "for a quiet window or 'always' to opt out."
+        )
+    # tz is mandatory whenever idle_window is a real time range; optional
+    # only when idle_window == 'always' (no clock math needed).
+    if meta.get("idle_window") not in (None, "always"):
+        if "idle_window_tz" not in meta:
+            errors.append(
+                "meta.idle_window_tz is required when meta.idle_window is a "
+                "time range. Use an IANA zone name (e.g. 'America/Los_Angeles')."
+            )
+    if "idle_window_tz" in meta and not iana_tz_ok(meta["idle_window_tz"]):
+        errors.append(
+            f"meta.idle_window_tz must be a valid IANA timezone "
+            f"(e.g. 'America/Los_Angeles', 'UTC'); got {meta['idle_window_tz']!r}"
+        )
+    if "gha_minutes_cap" in meta:
+        cap = meta["gha_minutes_cap"]
+        if not isinstance(cap, int) or isinstance(cap, bool) or cap < 1:
+            errors.append("meta.gha_minutes_cap must be a positive integer")
+    if "kill_switch" in meta and not isinstance(meta["kill_switch"], bool):
+        errors.append("meta.kill_switch must be a bool")
 
     # 12. neutralized_tasks (optional, but if present must be a list of dicts)
     nts = config.get("neutralized_tasks", [])

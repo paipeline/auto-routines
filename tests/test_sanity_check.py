@@ -80,6 +80,45 @@ def schema3_config() -> dict:
     }
 
 
+@pytest.fixture
+def schema4_config() -> dict:
+    """Minimal valid schema-4 config — adds idle window, GHA cost cap,
+    per-routine execution_surface + est_minutes, kill switch."""
+    return {
+        "schema_version": 4,
+        "repo_slug": "demo-repo",
+        "goal": "ship v1",
+        "mode": "fully-auto",
+        "deps": {"gh": "required", "mcps": ["scheduled-tasks"]},
+        "routines": [
+            {
+                "id": "pr-watcher",
+                "state": "ACTIVE",
+                "primitive": "scheduled",
+                "trigger": {"cron": "*/30 * * * *", "human": "every 30 minutes"},
+                "purpose": "watch PRs",
+                "automation_level": "auto",
+                "self_evolve": True,
+                "stagnation_threshold": 7,
+                "execution_surface": "gha",
+                "est_minutes": 4,
+            }
+        ],
+        "neutralized_tasks": [],
+        "meta": {
+            "cron": "0 9 * * *",
+            "human": "9:00 AM daily",
+            "anti_flap_window": 7,
+            "default_stagnation_threshold": 7,
+            "process_evolve_requests": True,
+            "idle_window": "22:00-08:00",
+            "idle_window_tz": "America/Los_Angeles",
+            "gha_minutes_cap": 60,
+            "kill_switch": False,
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Happy paths
 # ---------------------------------------------------------------------------
@@ -449,3 +488,232 @@ def test_meta_budget_optional(schema3_config):
 def test_meta_budget_constants_exposed():
     """SKILL.md and status.py reference these tiers — pin them."""
     assert sanity.BUDGET_TIERS == {"low", "medium", "high", "custom"}
+
+
+# ---------------------------------------------------------------------------
+# Schema 4 — execution_surface, idle_window, GHA cost cap, kill switch
+# (PRD #10 Module 5 — adaptive responsiveness + cost ceiling for GHA)
+# ---------------------------------------------------------------------------
+
+def test_schema4_template_passes(schema4_config):
+    assert sanity.check(schema4_config) == []
+
+
+# ---- meta.idle_window -----------------------------------------------------
+
+def test_schema4_idle_window_required(schema4_config):
+    """Schema 4 mandates an idle window (or 'always') so the orchestrator
+    knows when it's allowed to dispatch GHA work."""
+    del schema4_config["meta"]["idle_window"]
+    errors = sanity.check(schema4_config)
+    assert any("idle_window" in e for e in errors), errors
+
+
+@pytest.mark.parametrize(
+    "window",
+    [
+        "22:00-08:00",   # overnight (wraps midnight)
+        "09:00-17:00",   # daytime
+        "00:00-23:59",   # all but last minute
+        "always",        # never idle — work any time
+    ],
+)
+def test_idle_window_valid_forms_accepted(schema4_config, window):
+    schema4_config["meta"]["idle_window"] = window
+    if window == "always":
+        # tz becomes optional when 'always'
+        schema4_config["meta"].pop("idle_window_tz", None)
+    assert sanity.check(schema4_config) == []
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "22-08",          # missing minutes
+        "22:00",          # missing range
+        "22:00-",         # missing end
+        "22:00:00-08:00", # seconds not allowed
+        "25:00-08:00",    # hour out of range
+        "22:60-08:00",    # minute out of range
+        "always 22:00",   # garbage
+        "",
+        42,
+        None,
+    ],
+)
+def test_idle_window_malformed_rejected(schema4_config, bad):
+    schema4_config["meta"]["idle_window"] = bad
+    errors = sanity.check(schema4_config)
+    assert any("idle_window" in e for e in errors), errors
+
+
+# ---- meta.idle_window_tz --------------------------------------------------
+
+def test_idle_window_tz_required_when_window_set(schema4_config):
+    """If idle_window is a real time range, idle_window_tz is mandatory.
+    Skipping it would silently default to UTC and surprise the user."""
+    del schema4_config["meta"]["idle_window_tz"]
+    # idle_window is "22:00-08:00" — definitely needs a tz
+    errors = sanity.check(schema4_config)
+    assert any("idle_window_tz" in e for e in errors), errors
+
+
+def test_idle_window_tz_optional_when_always(schema4_config):
+    """'always' means no idle window, so tz is moot."""
+    schema4_config["meta"]["idle_window"] = "always"
+    schema4_config["meta"].pop("idle_window_tz", None)
+    assert sanity.check(schema4_config) == []
+
+
+@pytest.mark.parametrize(
+    "tz",
+    [
+        "America/Los_Angeles",
+        "Europe/Berlin",
+        "Asia/Tokyo",
+        "UTC",
+    ],
+)
+def test_idle_window_tz_iana_accepted(schema4_config, tz):
+    schema4_config["meta"]["idle_window_tz"] = tz
+    assert sanity.check(schema4_config) == []
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["PST", "GMT+8", "Mars/Olympus", "", 42, None],
+)
+def test_idle_window_tz_non_iana_rejected(schema4_config, bad):
+    schema4_config["meta"]["idle_window_tz"] = bad
+    errors = sanity.check(schema4_config)
+    assert any("idle_window_tz" in e for e in errors), errors
+
+
+# ---- meta.gha_minutes_cap -------------------------------------------------
+
+def test_gha_minutes_cap_optional(schema4_config):
+    """Default is 60 (matches PRD #10 — story 30); validator just checks
+    the field is well-formed when present."""
+    schema4_config["meta"].pop("gha_minutes_cap", None)
+    assert sanity.check(schema4_config) == []
+
+
+@pytest.mark.parametrize("cap", [1, 30, 60, 240, 1440])
+def test_gha_minutes_cap_positive_int_accepted(schema4_config, cap):
+    schema4_config["meta"]["gha_minutes_cap"] = cap
+    assert sanity.check(schema4_config) == []
+
+
+@pytest.mark.parametrize("bad", [0, -1, "60", 1.5, None, True])
+def test_gha_minutes_cap_must_be_positive_int(schema4_config, bad):
+    schema4_config["meta"]["gha_minutes_cap"] = bad
+    errors = sanity.check(schema4_config)
+    assert any("gha_minutes_cap" in e for e in errors), errors
+
+
+# ---- meta.kill_switch (story 29) ------------------------------------------
+
+def test_kill_switch_optional(schema4_config):
+    schema4_config["meta"].pop("kill_switch", None)
+    assert sanity.check(schema4_config) == []
+
+
+@pytest.mark.parametrize("v", [True, False])
+def test_kill_switch_bool_accepted(schema4_config, v):
+    schema4_config["meta"]["kill_switch"] = v
+    assert sanity.check(schema4_config) == []
+
+
+@pytest.mark.parametrize("bad", ["yes", 1, 0, None, "true"])
+def test_kill_switch_must_be_bool(schema4_config, bad):
+    schema4_config["meta"]["kill_switch"] = bad
+    errors = sanity.check(schema4_config)
+    assert any("kill_switch" in e for e in errors), errors
+
+
+# ---- routines[].execution_surface -----------------------------------------
+
+@pytest.mark.parametrize("surface", ["gha", "local"])
+def test_execution_surface_valid_values_accepted(schema4_config, surface):
+    schema4_config["routines"][0]["execution_surface"] = surface
+    assert sanity.check(schema4_config) == []
+
+
+@pytest.mark.parametrize("bad", ["both", "BOTH", "cloud", "", None, "GHA"])
+def test_execution_surface_rejects_invalid(schema4_config, bad):
+    """No 'both' — that was the reviewer-flagged ambiguity in PRD #10
+    (each routine fires on exactly one surface)."""
+    schema4_config["routines"][0]["execution_surface"] = bad
+    errors = sanity.check(schema4_config)
+    assert any("execution_surface" in e for e in errors), errors
+
+
+def test_execution_surface_required_for_scheduled_at_schema_4(schema4_config):
+    """Scheduled and pr-poll routines must declare which surface they run on
+    — that's how the orchestrator routes dispatch."""
+    del schema4_config["routines"][0]["execution_surface"]
+    errors = sanity.check(schema4_config)
+    assert any("execution_surface" in e for e in errors), errors
+
+
+def test_execution_surface_required_for_pr_poll_at_schema_4(schema4_config):
+    schema4_config["routines"][0]["primitive"] = "pr-poll"
+    del schema4_config["routines"][0]["execution_surface"]
+    errors = sanity.check(schema4_config)
+    assert any("execution_surface" in e for e in errors), errors
+
+
+def test_execution_surface_not_required_for_hook(schema4_config):
+    """Hook routines run inside the user's Claude session — no surface choice."""
+    schema4_config["routines"][0]["primitive"] = "hook"
+    schema4_config["routines"][0]["trigger"] = {"event": "Stop"}
+    schema4_config["routines"][0].pop("execution_surface", None)
+    assert sanity.check(schema4_config) == []
+
+
+def test_execution_surface_not_required_for_git_hook(schema4_config):
+    schema4_config["routines"][0]["primitive"] = "git-hook"
+    schema4_config["routines"][0]["trigger"] = {}
+    schema4_config["routines"][0].pop("execution_surface", None)
+    assert sanity.check(schema4_config) == []
+
+
+def test_execution_surface_optional_at_schema_3(schema3_config):
+    """Backward compat: schema 3 configs (no execution_surface anywhere)
+    must keep validating after the schema 4 rule lands."""
+    assert sanity.check(schema3_config) == []
+
+
+# ---- routines[].est_minutes -----------------------------------------------
+
+def test_est_minutes_optional(schema4_config):
+    """Default is 5 minutes per fire (used by orchestrator to project
+    cost against gha_minutes_cap)."""
+    schema4_config["routines"][0].pop("est_minutes", None)
+    assert sanity.check(schema4_config) == []
+
+
+@pytest.mark.parametrize("est", [1, 4, 10, 60])
+def test_est_minutes_positive_int_accepted(schema4_config, est):
+    schema4_config["routines"][0]["est_minutes"] = est
+    assert sanity.check(schema4_config) == []
+
+
+@pytest.mark.parametrize("bad", [0, -1, "5", 4.5, None, True])
+def test_est_minutes_must_be_positive_int(schema4_config, bad):
+    schema4_config["routines"][0]["est_minutes"] = bad
+    errors = sanity.check(schema4_config)
+    assert any("est_minutes" in e for e in errors), errors
+
+
+# ---- schema_version bump --------------------------------------------------
+
+def test_schema_version_4_accepted(schema4_config):
+    """Sanity: the validator recognizes schema_version 4 and applies the new rules."""
+    assert sanity.check(schema4_config) == []
+    # And drops back into schema 3 mode when the version is older
+    schema4_config["schema_version"] = 3
+    schema4_config["meta"].pop("idle_window", None)
+    schema4_config["meta"].pop("idle_window_tz", None)
+    schema4_config["routines"][0].pop("execution_surface", None)
+    assert sanity.check(schema4_config) == []
