@@ -420,7 +420,21 @@ user is never staring at a silent terminal for more than a few seconds.
 Fully auto. Every change is checkpointed and sanity-checked.
 
 1. **Health check** (Guardrail 4).
-2. **Drain mid-run requests**: read `.iteration/evolve_requests.jsonl`, parse each entry. Mark all targeted routines `state: ACTIVE → EVOLVING` for this iter. After processing, truncate the file. Log every drained request in `iter-NNN.md`.
+2. **Drain mid-run requests** via pure-script — no LLM parsing:
+   ```bash
+   python3 scripts/orchestrator.py drain-evolve-requests \
+       --file .iteration/evolve_requests.jsonl \
+       --apply
+   ```
+   Output is one JSON object per valid request (`ts`, `routine_id`,
+   `reason`, `suggested`) preceded by any `# warn:` lines for malformed
+   entries. For every plan line, mark the targeted routine `state:
+   ACTIVE → EVOLVING` for this iter. Surface any warning lines to the
+   user (they name a line that was rejected and skipped). The `--apply`
+   flag truncates the file after a successful drain — except when zero
+   valid plan lines were produced (so the user can fix-and-retry a
+   file of malformed requests). Log every drained request in
+   `iter-NNN.md`.
 3. **Gather signals**:
    - `git log --since="<last-iter-time>"`
    - `gh pr list --state all --limit 30 --json number,state,title,statusCheckRollup`

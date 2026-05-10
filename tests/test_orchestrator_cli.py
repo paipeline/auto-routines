@@ -1248,3 +1248,234 @@ class TestFirstPrEta:
         assert "\n" not in text, (
             f"ETA output must be a single line; got:\n{text!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Drain evolve-requests
+# ---------------------------------------------------------------------------
+# PRD goal.md (Coverage and correctness): "Add tests for the `evolve`
+# flow — drain `evolve_requests.jsonl`, perform the FSM transitions,
+# write a checkpoint, apply, verify."
+#
+# The evolve flow as a whole lives in SKILL.md `Mode: evolve` (LLM-
+# driven). But the *drain step* is pure mechanics — read JSONL,
+# validate each line, emit a parseable plan of which routines move
+# ACTIVE → EVOLVING. Pulling it into a pure-script subcommand lets
+# us pin the contract in code (and saves the LLM from re-parsing
+# the file on every evolve fire).
+#
+# The drain subcommand:
+#   - reads `.iteration/evolve_requests.jsonl`
+#   - validates each line against the schema (ts, routine_id, reason,
+#     suggested — same shape SKILL.md "Mid-run self-evolution" pins)
+#   - emits one JSON line per valid request to stdout (the plan)
+#   - emits `# warn:` lines for malformed entries (LLM surfaces them
+#     but doesn't have to retry the parse itself)
+#   - default is dry-run (file untouched); `--apply` truncates after
+#     a successful drain — atomic via tempfile + os.replace so a
+#     crash mid-drain doesn't lose un-processed entries
+
+class TestDrainEvolveRequests:
+    def _write_jsonl(self, tmp_path, entries):
+        """Write entries (list of dicts) one-per-line to a tmp jsonl."""
+        p = tmp_path / "evolve_requests.jsonl"
+        with open(p, "w") as f:
+            for entry in entries:
+                f.write(json.dumps(entry) + "\n")
+        return p
+
+    def _valid_request(self, **overrides):
+        base = {
+            "ts": "2026-05-10T14:32:00-0700",
+            "routine_id": "pr-ci-watcher",
+            "reason": "CI flake rate at 0% over last 200 PRs",
+            "suggested": "reduce frequency",
+        }
+        base.update(overrides)
+        return base
+
+    def _read_plan_lines(self, text):
+        """Extract JSON-decodable plan lines from drain output."""
+        out_lines = []
+        for ln in text.splitlines():
+            s = ln.strip()
+            if not s or s.startswith("#"):
+                continue
+            out_lines.append(json.loads(s))
+        return out_lines
+
+    def test_drain_emits_plan_line_per_valid_request(self, orch, tmp_path):
+        """The whole reason this subcommand exists: turn a jsonl file
+        into a stream of validated, parseable plan lines so the LLM
+        step iterates instead of parses."""
+        f = self._write_jsonl(
+            tmp_path,
+            [
+                self._valid_request(routine_id="pr-ci-watcher"),
+                self._valid_request(routine_id="daily-digest"),
+            ],
+        )
+        out = io.StringIO()
+        rc = orch.cli_main(
+            ["drain-evolve-requests", "--file", str(f)],
+            stdout=out,
+        )
+        assert rc == 0, out.getvalue()
+        plan = self._read_plan_lines(out.getvalue())
+        assert len(plan) == 2
+        ids = {entry["routine_id"] for entry in plan}
+        assert ids == {"pr-ci-watcher", "daily-digest"}
+
+    def test_drain_dry_run_does_not_truncate(self, orch, tmp_path):
+        """Default mode reads but doesn't mutate — so re-running it
+        produces the same output. The LLM may invoke this multiple
+        times in a single evolve fire (e.g. to re-display the plan
+        after a sanity-check)."""
+        f = self._write_jsonl(tmp_path, [self._valid_request()])
+        before = f.read_text()
+        out = io.StringIO()
+        rc = orch.cli_main(
+            ["drain-evolve-requests", "--file", str(f)],
+            stdout=out,
+        )
+        assert rc == 0
+        assert f.read_text() == before, (
+            "default drain (no --apply) must NOT mutate the jsonl file"
+        )
+
+    def test_drain_apply_truncates_after_emit(self, orch, tmp_path):
+        """`--apply` is the commit half. After a successful drain the
+        file is empty. SKILL.md step 2 pins this — once a request
+        has been processed it must not fire again on the next evolve."""
+        f = self._write_jsonl(tmp_path, [self._valid_request()])
+        out = io.StringIO()
+        rc = orch.cli_main(
+            ["drain-evolve-requests", "--file", str(f), "--apply"],
+            stdout=out,
+        )
+        assert rc == 0
+        plan = self._read_plan_lines(out.getvalue())
+        assert len(plan) == 1
+        assert f.read_text() == "", (
+            "--apply must truncate the jsonl file so a re-drain "
+            "produces no plan lines"
+        )
+
+    def test_drain_missing_file_is_a_noop(self, orch, tmp_path):
+        """A fresh repo has no `evolve_requests.jsonl` yet. Drain must
+        succeed with zero plan lines — not error — so the SKILL.md
+        step doesn't need a `[ -f ... ]` guard."""
+        f = tmp_path / "does-not-exist.jsonl"
+        out = io.StringIO()
+        rc = orch.cli_main(
+            ["drain-evolve-requests", "--file", str(f)],
+            stdout=out,
+        )
+        assert rc == 0
+        assert self._read_plan_lines(out.getvalue()) == []
+
+    def test_drain_empty_file_emits_zero_plan_lines(self, orch, tmp_path):
+        f = self._write_jsonl(tmp_path, [])
+        out = io.StringIO()
+        rc = orch.cli_main(
+            ["drain-evolve-requests", "--file", str(f)],
+            stdout=out,
+        )
+        assert rc == 0
+        assert self._read_plan_lines(out.getvalue()) == []
+
+    def test_drain_warns_on_malformed_json(self, orch, tmp_path):
+        """A garbled line must NOT abort the whole drain — valid lines
+        after it must still emit. The malformed line surfaces as a
+        `# warn:` so the LLM step can show the user what was rejected."""
+        f = tmp_path / "evolve_requests.jsonl"
+        f.write_text(
+            "this is not json\n"
+            + json.dumps(self._valid_request(routine_id="daily-digest")) + "\n"
+        )
+        out = io.StringIO()
+        err = io.StringIO()
+        rc = orch.cli_main(
+            ["drain-evolve-requests", "--file", str(f)],
+            stdout=out,
+            stderr=err,
+        )
+        assert rc == 0, "malformed lines are warnings, not hard fails"
+        plan = self._read_plan_lines(out.getvalue())
+        assert len(plan) == 1 and plan[0]["routine_id"] == "daily-digest", (
+            "valid lines after a malformed one must still emit"
+        )
+        # The warning surfaces somewhere visible — either stdout
+        # (alongside the plan, as a # warn: line) or stderr.
+        combined = (out.getvalue() + err.getvalue()).lower()
+        assert "warn" in combined or "invalid" in combined or "malformed" in combined, (
+            "drain must surface a warning for the malformed line so "
+            "the user knows their request was rejected"
+        )
+
+    def test_drain_warns_on_missing_required_field(self, orch, tmp_path):
+        """A request missing `routine_id` is malformed — the FSM
+        transition can't target an anonymous routine. Treat it the
+        same as malformed JSON."""
+        f = self._write_jsonl(
+            tmp_path,
+            [
+                {"ts": "2026-05-10T14:32:00-0700", "reason": "x", "suggested": "y"},
+                self._valid_request(routine_id="daily-digest"),
+            ],
+        )
+        out = io.StringIO()
+        rc = orch.cli_main(
+            ["drain-evolve-requests", "--file", str(f)],
+            stdout=out,
+        )
+        assert rc == 0
+        plan = self._read_plan_lines(out.getvalue())
+        assert len(plan) == 1
+        assert plan[0]["routine_id"] == "daily-digest"
+
+    def test_drain_apply_does_not_truncate_on_warning_only_input(self, orch, tmp_path):
+        """Edge case: if every line is malformed, --apply should NOT
+        truncate — the user might want to fix-and-retry. (Truncating
+        would silently swallow whatever they meant to send.)"""
+        f = tmp_path / "evolve_requests.jsonl"
+        f.write_text("not json\nalso not json\n")
+        before = f.read_text()
+        out = io.StringIO()
+        rc = orch.cli_main(
+            ["drain-evolve-requests", "--file", str(f), "--apply"],
+            stdout=out,
+        )
+        assert rc == 0
+        plan = self._read_plan_lines(out.getvalue())
+        assert plan == []
+        assert f.read_text() == before, (
+            "--apply must NOT truncate when zero valid plan lines were "
+            "produced — silently dropping all the user's requests is the "
+            "worst possible failure mode"
+        )
+
+    def test_drain_plan_lines_carry_full_request_shape(self, orch, tmp_path):
+        """Each plan line must carry every field the LLM step expects:
+        ts, routine_id, reason, suggested. Otherwise the SKILL.md step
+        has to re-read the source file — defeating the point of the
+        drain."""
+        req = self._valid_request(
+            routine_id="pr-ci-watcher",
+            reason="testing reason",
+            suggested="stop",
+        )
+        f = self._write_jsonl(tmp_path, [req])
+        out = io.StringIO()
+        rc = orch.cli_main(
+            ["drain-evolve-requests", "--file", str(f)],
+            stdout=out,
+        )
+        assert rc == 0
+        plan = self._read_plan_lines(out.getvalue())
+        entry = plan[0]
+        for k in ("ts", "routine_id", "reason", "suggested"):
+            assert k in entry, f"plan line missing field {k!r}"
+        assert entry["routine_id"] == "pr-ci-watcher"
+        assert entry["suggested"] == "stop"
+        assert entry["reason"] == "testing reason"

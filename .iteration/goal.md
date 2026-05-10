@@ -17,8 +17,12 @@ broken installs, or routines that drift back to "analyze only."
       (`.git/hooks/post-commit` exists & executable, `.claude/skills/<id>/SKILL.md`
       filled with no `{{placeholders}}`, `.iteration/config.yaml` passes
       sanity-check). Currently the test suite only covers the schema and catalog.
-- [ ] Add tests for the `evolve` flow — drain `evolve_requests.jsonl`, perform
+- [~] Add tests for the `evolve` flow — drain `evolve_requests.jsonl`, perform
       the FSM transitions, write a checkpoint, apply, verify.
+      Partial: drain half shipped as `scripts/orchestrator.py drain-evolve-requests`
+      (9 invariants in `TestDrainEvolveRequests`). FSM transitions, checkpoint,
+      apply, verify remain as separate slices — the SKILL.md prose for each
+      is LLM-driven and resists single-function extraction.
 - [x] Add a test that boots the post-commit hook in a sandbox and asserts the
       background routines fire (subshell exit code observable via the log).
       Shipped in `tests/test_post_commit_hook_sandbox.py` — 7 invariants

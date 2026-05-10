@@ -630,6 +630,37 @@ def _make_parser() -> argparse.ArgumentParser:
         default=str(pathlib.Path(__file__).resolve().parent.parent / "templates" / "routine-catalog.yaml"),
         help="Path to templates/routine-catalog.yaml (defaults to the in-tree catalog).",
     )
+
+    # drain-evolve-requests: pure-script half of SKILL.md `Mode: evolve`
+    # step 2. Parse, validate, emit a JSON plan; --apply truncates on
+    # success. PRD goal.md (Coverage and correctness): "Add tests for
+    # the `evolve` flow — drain evolve_requests.jsonl, perform the FSM
+    # transitions, write a checkpoint, apply, verify."
+    drain_p = sub.add_parser(
+        "drain-evolve-requests",
+        help="Drain .iteration/evolve_requests.jsonl and emit a JSON plan.",
+        description=(
+            "Read the evolve-requests jsonl, validate each line against "
+            "the schema (ts, routine_id, reason, suggested), and emit "
+            "one JSON object per valid request to stdout. Default is "
+            "dry-run (file untouched); --apply truncates the file after "
+            "a successful drain. Pure-script, no LLM tokens."
+        ),
+    )
+    drain_p.add_argument(
+        "--file",
+        required=True,
+        help="Path to .iteration/evolve_requests.jsonl. Missing file is a no-op.",
+    )
+    drain_p.add_argument(
+        "--apply",
+        action="store_true",
+        help=(
+            "After emitting the plan, truncate the file. Skipped when "
+            "zero valid plan lines were produced (so a fix-and-retry is "
+            "still possible)."
+        ),
+    )
     return p
 
 
@@ -846,6 +877,93 @@ def _cli_first_pr_eta(args, out, err) -> int:
     return 0
 
 
+# Required keys per evolve-request line. Schema mirrors SKILL.md
+# "Mid-run self-evolution" — a request must name when, who, why, and
+# what to do. Missing any of these makes the request un-actionable;
+# the LLM step can't apply an anonymous suggestion to no routine.
+_EVOLVE_REQUEST_REQUIRED = ("ts", "routine_id", "reason", "suggested")
+
+
+def _cli_drain_evolve_requests(args, out, err) -> int:
+    """Drain `.iteration/evolve_requests.jsonl` and emit a JSON plan.
+
+    Missing file → 0 plan lines, exit 0 (a fresh repo has no requests).
+    Empty file → 0 plan lines, exit 0.
+    Malformed lines → `# warn:` line on stdout, valid lines still emit.
+    --apply → truncate the file ONLY if at least one valid plan line
+              was produced (silently swallowing every malformed request
+              is the worst possible failure mode).
+
+    Pure read+write; no MCP, no network."""
+    path = pathlib.Path(args.file)
+    if not path.exists():
+        # No file = no requests. Quiet success — SKILL.md step 2 can
+        # call this unconditionally without a `[ -f ... ]` guard.
+        return 0
+
+    plan_entries: list[dict] = []
+    warnings: list[str] = []
+
+    try:
+        raw = path.read_text()
+    except OSError as e:
+        print(f"drain failed: {e}", file=err)
+        return 1
+
+    for lineno, line in enumerate(raw.splitlines(), start=1):
+        s = line.strip()
+        if not s:
+            continue
+        try:
+            entry = json.loads(s)
+        except json.JSONDecodeError as e:
+            warnings.append(
+                f"# warn: line {lineno}: invalid JSON ({e.msg}) — skipped"
+            )
+            continue
+        if not isinstance(entry, dict):
+            warnings.append(
+                f"# warn: line {lineno}: not a JSON object — skipped"
+            )
+            continue
+        missing = [k for k in _EVOLVE_REQUEST_REQUIRED if k not in entry]
+        if missing:
+            warnings.append(
+                f"# warn: line {lineno}: missing required field(s) "
+                f"{missing} — skipped"
+            )
+            continue
+        # Emit a normalized entry (sorted keys) so the LLM step has a
+        # stable shape per line.
+        plan_entries.append(
+            {k: entry[k] for k in _EVOLVE_REQUEST_REQUIRED}
+        )
+
+    # Emit warnings first, then plan lines — keeps malformed-input
+    # surface visible at the top of the output.
+    for w in warnings:
+        out.write(w + "\n")
+    for entry in plan_entries:
+        out.write(json.dumps(entry, sort_keys=True) + "\n")
+
+    # Truncate only if --apply was passed AND at least one valid plan
+    # line was produced. The "no valid lines" guard prevents silently
+    # discarding a file the user filled with malformed requests they'd
+    # want to fix and retry.
+    if args.apply and plan_entries:
+        try:
+            # Atomic-via-tempfile-and-rename so a crash mid-write
+            # doesn't lose un-processed entries.
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text("")
+            os.replace(tmp, path)
+        except OSError as e:
+            print(f"truncate failed: {e}", file=err)
+            return 1
+
+    return 0
+
+
 def _cli_test_fire(args, out, err) -> int:
     """Manual one-shot dispatch plan for `/auto-routines test-fire <id>`.
 
@@ -937,6 +1055,9 @@ def cli_main(
 
     if args.command == "first-pr-eta":
         return _cli_first_pr_eta(args, out, err)
+
+    if args.command == "drain-evolve-requests":
+        return _cli_drain_evolve_requests(args, out, err)
 
     if args.command != "tick":
         print(f"unknown command: {args.command}", file=err)
