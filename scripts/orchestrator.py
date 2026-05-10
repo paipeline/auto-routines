@@ -349,3 +349,228 @@ def tick(
         }
 
     return {"decisions": decisions, "new_state": new_state}
+
+
+# ---------------------------------------------------------------------------
+# CLI shim — what the GHA workflow (and ad-hoc local debug) calls.
+#
+# The pure functions above are what we test heavily. This block is the
+# integration glue: argv → trigger dict, file I/O for state.json, JSON
+# output the workflow can consume. Kept small on purpose; everything
+# meaningful is delegated to the pure functions.
+# ---------------------------------------------------------------------------
+
+import argparse  # noqa: E402  (intentional: keep CLI deps off the import path
+import json      # noqa: E402   for callers that just want pure functions)
+import os        # noqa: E402
+import sys       # noqa: E402
+import tempfile  # noqa: E402
+
+
+def _parse_now(s: str) -> dt.datetime:
+    """Parse `--now` strictly. Refuses naive datetimes and refuses UTC `Z`
+    suffix (silent-UTC is exactly the footgun PRD #10 review called out).
+
+    Accepts: `2026-05-10T14:00:00+0000`, `2026-05-10T14:00:00-0700`.
+    Refuses: `2026-05-10T14:00:00`, `2026-05-10T14:00:00Z`.
+    """
+    if s.endswith("Z"):
+        raise ValueError(
+            f"--now must use ±HHMM offset (got {s!r}); UTC `Z` is banned "
+            "to make local-clock vs UTC mismatches loud"
+        )
+    # fromisoformat in 3.11+ accepts ±HH:MM but not ±HHMM. Normalize.
+    if len(s) >= 5 and s[-5] in ("+", "-") and s[-3] != ":":
+        s_norm = s[:-2] + ":" + s[-2:]
+    else:
+        s_norm = s
+    parsed = dt.datetime.fromisoformat(s_norm)
+    if parsed.tzinfo is None:
+        raise ValueError(
+            f"--now must include a tz offset (got {s!r}); "
+            "naive datetimes are refused to avoid silent-UTC bugs"
+        )
+    return parsed
+
+
+def _load_yaml(path: str) -> dict:
+    """Lazy import — pure-function callers shouldn't pay the yaml import cost."""
+    import yaml
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def _load_state_or_bootstrap(path: str, *, now: dt.datetime, tz_name: str) -> dict:
+    """Load state.json from disk; bootstrap with initial_state() if missing.
+
+    First-tick scenario: workflow runs before any state has been written.
+    Lazy-imports state.py to keep the pure-function path import-free.
+    """
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    # Bootstrap from state.initial_state(). Imported lazily so the
+    # pure-function import path stays import-free.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_state_bootstrap", os.path.join(os.path.dirname(__file__), "state.py")
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    reset_date = _to_zone(now, tz_name).date().isoformat()
+    return mod.initial_state(reset_date)
+
+
+def _atomic_write_json(path: str, data: dict) -> None:
+    """Write JSON to path atomically (tempfile + rename). Two writers
+    (GHA + local) means a partial write would be corrupting; this is
+    cheap insurance."""
+    d = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".state.", suffix=".json.tmp", dir=d)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, sort_keys=True)
+            f.write("\n")
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _build_trigger(args: argparse.Namespace) -> dict:
+    """Translate CLI flags → trigger dict consumed by match_trigger()."""
+    t = args.trigger_type
+    if t == "cron":
+        return {"type": "cron", "cron_expr": args.cron_expr or ""}
+    if t == "hook":
+        return {"type": "hook", "hook_event": args.hook_event or ""}
+    if t == "git-hook":
+        return {"type": "git-hook"}
+    if t == "manual":
+        ids = [s.strip() for s in (args.routine_ids or "").split(",") if s.strip()]
+        return {"type": "manual", "routine_ids": ids}
+    # Unknown — match_trigger will raise; we let that surface.
+    return {"type": t}
+
+
+def _make_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="orchestrator",
+        description="auto-routines orchestrator — pure tick() with a thin CLI shim.",
+    )
+    sub = p.add_subparsers(dest="command", required=True)
+
+    tick_p = sub.add_parser(
+        "tick",
+        help="Run one orchestration tick: match trigger → decide → write state.",
+        description=(
+            "Reads config + state, matches the incoming trigger to "
+            "candidate routines, runs tick(), writes new state, prints "
+            "decisions JSON on stdout."
+        ),
+    )
+    tick_p.add_argument("--config", required=True, help="Path to .iteration/config.yaml")
+    tick_p.add_argument("--state", required=True, help="Path to .iteration/state.json (created if missing)")
+    tick_p.add_argument(
+        "--trigger-type", required=True,
+        choices=["cron", "hook", "git-hook", "manual"],
+        help="What woke us up.",
+    )
+    tick_p.add_argument("--cron-expr", help="Required when --trigger-type=cron")
+    tick_p.add_argument("--hook-event", help="Required when --trigger-type=hook (e.g. Stop)")
+    tick_p.add_argument(
+        "--routine-ids",
+        help="Comma-separated ids, required when --trigger-type=manual",
+    )
+    tick_p.add_argument(
+        "--now",
+        help=(
+            "Override the clock for testing (must include ±HHMM offset; "
+            "UTC `Z` refused). Defaults to the configured idle_window_tz now."
+        ),
+    )
+    return p
+
+
+def cli_main(
+    argv: list[str],
+    *,
+    stdout=None,
+    stderr=None,
+) -> int:
+    """Entry point for the CLI. Returns an exit code; does not call sys.exit
+    (so tests can drive it without process boundaries).
+
+    `stdout`/`stderr` are injectable so tests can capture output without
+    monkeypatching sys.* globals."""
+    out = stdout if stdout is not None else sys.stdout
+    err = stderr if stderr is not None else sys.stderr
+
+    parser = _make_parser()
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as e:
+        # argparse calls sys.exit on error; absorb so callers get a code
+        # rather than a crash. argparse already wrote to stderr.
+        return int(e.code) if e.code is not None else 2
+
+    if args.command != "tick":
+        print(f"unknown command: {args.command}", file=err)
+        return 2
+
+    try:
+        config = _load_yaml(args.config)
+    except (OSError, Exception) as e:
+        print(f"config load failed: {e}", file=err)
+        return 1
+
+    meta = (config or {}).get("meta", {}) or {}
+    tz_name = meta.get("idle_window_tz") or "UTC"
+
+    # Resolve `now` — explicit override or current time in idle_window_tz.
+    try:
+        if args.now:
+            now = _parse_now(args.now)
+        else:
+            now = dt.datetime.now(tz=ZoneInfo(tz_name))
+    except (ValueError, ZoneInfoNotFoundError) as e:
+        print(f"--now invalid: {e}", file=err)
+        return 1
+
+    try:
+        state = _load_state_or_bootstrap(args.state, now=now, tz_name=tz_name)
+    except OSError as e:
+        print(f"state load failed: {e}", file=err)
+        return 1
+
+    trigger = _build_trigger(args)
+    routines = (config or {}).get("routines", []) or []
+
+    try:
+        candidates = match_trigger(trigger, routines)
+    except ValueError as e:
+        print(f"trigger error: {e}", file=err)
+        return 1
+
+    try:
+        result = tick(now, candidates, state, config)
+    except ValueError as e:
+        print(f"tick error: {e}", file=err)
+        return 1
+
+    try:
+        _atomic_write_json(args.state, result["new_state"])
+    except OSError as e:
+        print(f"state write failed: {e}", file=err)
+        return 1
+
+    json.dump({"decisions": result["decisions"]}, out)
+    out.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(cli_main(sys.argv[1:]))
