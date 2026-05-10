@@ -94,9 +94,21 @@ broken installs, or routines that drift back to "analyze only."
       AND emits an `mcp-plan:` block of JSON lines for the SKILL.md Mode to
       hand to `mcp__scheduled-tasks__update_scheduled_task`. Pinned by
       `TestBudget` (config) + `TestBudgetMcpPlan` (MCP plan emission).
-- [ ] Trim the per-routine SKILL.md preamble. The current rendered template
+- [x] Trim the per-routine SKILL.md preamble. The current rendered template
       is ~3KB of boilerplate per fire; extract the FSM/state-handling section
       into a single shared file the routine can `cat` once at start.
+      Shipped — `templates/routine-preamble.md` is the canonical shared
+      contract (commit/PR procedure, log line format, FSM state-handling
+      table, failure modes, mid-run evolve-request shape).
+      `templates/routine-skill.md` trimmed from 101 to 41 lines; remaining
+      content is purely per-routine + a `## Reference` pointer at
+      `.claude/skills/_shared/preamble.md`. SKILL.md install step 6f
+      already plans the render. Pinned by `tests/test_routine_preamble.py`
+      (14 invariants across 4 classes: existence, no-placeholders, core
+      sections covered, json fenced block, drift detectors on the
+      routine-skill template). Legacy
+      `test_catalog.py::test_routine_skill_template_mandates_branch_and_pr`
+      repointed to the preamble file.
 
 ### Documentation
 - [x] Write a "first 24 hours" walkthrough in `docs/first-24h.md`.

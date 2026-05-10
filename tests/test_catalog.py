@@ -17,6 +17,7 @@ from .conftest import ROOT, sanity
 CATALOG_PATH = ROOT / "templates" / "routine-catalog.yaml"
 HOOK_TEMPLATE = ROOT / "templates" / "post-commit-hook.sh"
 ROUTINE_SKILL_TEMPLATE = ROOT / "templates" / "routine-skill.md"
+ROUTINE_PREAMBLE_TEMPLATE = ROOT / "templates" / "routine-preamble.md"
 
 REQUIRED_FIELDS = {
     "id", "purpose", "primitive", "trigger_default", "automation_default",
@@ -728,17 +729,36 @@ def test_rendered_skills_have_no_double_bullets():
 
 
 def test_routine_skill_template_mandates_branch_and_pr():
-    text = ROUTINE_SKILL_TEMPLATE.read_text()
-    # Regression guard: the failure mode the catalog exists to fix is that
-    # routines render plans instead of doing work. The template must bind
-    # them to commit + push + PR.
+    """The failure mode the catalog exists to fix is that routines
+    render plans instead of doing work. The contract that binds them
+    to commit + push + PR now lives in the SHARED preamble
+    (`templates/routine-preamble.md`), referenced from every per-
+    routine SKILL.md. Pin the contract there.
+
+    Previously this test asserted the same strings against
+    `templates/routine-skill.md`; the PRD `.iteration/goal.md`
+    "Trim the per-routine SKILL.md preamble" slice relocated the
+    boilerplate. The intent of the test is unchanged: the universal
+    commit + push + PR rules must exist somewhere the routine
+    actually reads."""
+    text = ROUTINE_PREAMBLE_TEMPLATE.read_text()
     for required in [
-        "routines/{{routine_id}}",   # branch convention
+        "routines/",                 # branch prefix convention
         "git push",
         "gh pr create",
         "Never push to main",
     ]:
-        assert required in text, f"routine-skill.md missing: {required!r}"
+        assert required in text, f"routine-preamble.md missing: {required!r}"
+
+    # And the per-routine template must still point at the preamble —
+    # otherwise the routine reads its SKILL.md and never finds the
+    # mandate that binds it to open a PR.
+    skill_text = ROUTINE_SKILL_TEMPLATE.read_text()
+    assert ".claude/skills/_shared/preamble.md" in skill_text, (
+        "templates/routine-skill.md must reference the shared "
+        "preamble — without it, the commit/PR contract is "
+        "unreachable from a fresh routine fire"
+    )
 
 
 # ---------------------------------------------------------------------------
