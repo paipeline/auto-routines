@@ -404,8 +404,11 @@ def tick(
 import argparse  # noqa: E402  (intentional: keep CLI deps off the import path
 import json      # noqa: E402   for callers that just want pure functions)
 import os        # noqa: E402
+import pathlib   # noqa: E402
 import sys       # noqa: E402
 import tempfile  # noqa: E402
+
+import yaml      # noqa: E402  (used by _cli_budget for atomic config rewrite)
 
 
 def _parse_now(s: str) -> dt.datetime:
@@ -558,6 +561,31 @@ def _make_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # budget: re-apply the cadence preset table to the live config.
+    # Mirrors the per-tier cron mapping in SKILL.md "Budget → cadence
+    # presets". Touches only routines named in the preset for that tier;
+    # everything else stays byte-identical.
+    budget_p = sub.add_parser(
+        "budget",
+        help="Re-apply the cadence preset for a budget tier to config.yaml.",
+        description=(
+            "Update `meta.budget` and rewrite cron expressions for "
+            "routines named in the per-tier preset table from SKILL.md. "
+            "Unrelated routines (git-hook routines, archetypes not in "
+            "the preset) are left byte-identical."
+        ),
+    )
+    budget_p.add_argument("--config", required=True, help="Path to .iteration/config.yaml")
+    budget_p.add_argument(
+        "--tier", required=True,
+        help=(
+            "Budget tier (low | medium | high | custom). low/medium/high "
+            "apply preset crons; custom is a no-op on crons but still "
+            "updates meta.budget. Validation happens in the handler so "
+            "the error message routes to our injectable stderr."
+        ),
+    )
+
     # test-fire: manual one-shot dispatch plan for a single routine.
     # Read-only — does not touch state.json. Used by `/auto-routines
     # test-fire <id>` for debugging without waiting for cron.
@@ -579,6 +607,122 @@ def _make_parser() -> argparse.ArgumentParser:
         help="Routine id to fire (must exist in config.yaml routines list).",
     )
     return p
+
+
+# Cadence preset table — single source of truth for the budget command.
+# Mirrors the table in SKILL.md "Budget → cadence presets". Each tier
+# maps routine_id -> (cron, human). Routines not in a tier's preset are
+# left untouched by the budget command (no silent downgrades of routines
+# the preset doesn't mention).
+BUDGET_PRESETS: dict[str, dict[str, tuple[str, str]]] = {
+    "low": {
+        "prd-implement": ("0 9 * * 1-5", "weekdays 9:00 AM"),
+        # daily-digest and session-doc-drift are intentionally absent
+        # at low tier — the install would skip them, but for a mid-run
+        # `budget low` the user keeps any existing config they had.
+    },
+    "medium": {
+        "prd-implement": ("0 */12 * * *", "every 12 hours"),
+        "daily-digest": ("0 18 * * *", "6:00 PM daily"),
+        "session-doc-drift": ("0 17 * * 1", "Mondays 5:00 PM"),
+    },
+    "high": {
+        "prd-implement": ("0 */4 * * *", "every 4 hours"),
+        "daily-digest": ("0 18 * * *", "6:00 PM daily"),
+        "session-doc-drift": ("0 17 * * 1-5", "5:00 PM weekdays"),
+    },
+    "custom": {
+        # custom tier is a no-op on crons; meta.budget is still updated
+        # so the dashboard / interview see the new tier.
+    },
+}
+
+# meta.cron preset (the meta-evolve daily/weekly cron, not a routine).
+META_CRON_PRESETS: dict[str, tuple[str, str]] = {
+    "low": ("0 9 * * 1", "Mondays 9:00 AM"),
+    "medium": ("0 9 * * *", "9:00 AM daily"),
+    "high": ("0 9 * * *", "9:00 AM daily"),
+    # custom: no rewrite.
+}
+
+
+def _cli_budget(args, out, err) -> int:
+    """Apply the cadence preset for `args.tier` to the config at
+    `args.config`. Updates meta.budget; rewrites trigger.{cron,human}
+    for routines in the preset; leaves everything else byte-identical.
+
+    Argparse already validated the tier choice (`low|medium|high|custom`)
+    so we don't re-check it here — but we still bounds-check the
+    preset lookup so a future tier added to argparse without a preset
+    entry fails loudly instead of silently no-op'ing."""
+    if args.tier not in BUDGET_PRESETS:
+        print(
+            f"unknown budget tier: {args.tier!r} "
+            f"(valid: {sorted(BUDGET_PRESETS)})",
+            file=err,
+        )
+        return 1
+
+    try:
+        config = _load_yaml(args.config)
+    except (OSError, Exception) as e:
+        print(f"config load failed: {e}", file=err)
+        return 1
+
+    if config is None:
+        print(f"config is empty: {args.config}", file=err)
+        return 1
+
+    preset = BUDGET_PRESETS[args.tier]
+
+    # 1. Update meta.budget. Always — even for `custom`.
+    config.setdefault("meta", {})["budget"] = args.tier
+
+    # 2. Update meta.cron / meta.human if a preset exists for this tier.
+    meta_preset = META_CRON_PRESETS.get(args.tier)
+    if meta_preset:
+        cron, human = meta_preset
+        config["meta"]["cron"] = cron
+        config["meta"]["human"] = human
+
+    # 3. Walk routines; rewrite the ones the preset names.
+    routines = config.get("routines", []) or []
+    touched: list[str] = []
+    for routine in routines:
+        rid = routine.get("id")
+        if rid not in preset:
+            continue
+        cron, human = preset[rid]
+        trigger = routine.setdefault("trigger", {})
+        trigger["cron"] = cron
+        trigger["human"] = human
+        touched.append(rid)
+
+    # 4. Write back to disk. Use atomic-via-tempfile-and-rename so a
+    # crash mid-write doesn't leave a half-rewritten config.
+    try:
+        _atomic_write_yaml(args.config, config)
+    except OSError as e:
+        print(f"config write failed: {e}", file=err)
+        return 1
+
+    out.write(
+        f"# budget set to {args.tier!r}\n"
+        f"# touched routines: {touched or '(none — preset is empty)'}\n"
+        f"# meta.cron updated: {bool(meta_preset)}\n"
+    )
+    return 0
+
+
+def _atomic_write_yaml(path: str, data: dict) -> None:
+    """Atomic write of `data` as YAML to `path`. Mirrors
+    `_atomic_write_json` — tempfile in the same directory then
+    `os.replace` so an interrupted write doesn't leave a half-file."""
+    p = pathlib.Path(path)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    text = yaml.safe_dump(data, sort_keys=False)
+    tmp.write_text(text)
+    os.replace(tmp, p)
 
 
 def _cli_test_fire(args, out, err) -> int:
@@ -666,6 +810,9 @@ def cli_main(
 
     if args.command == "test-fire":
         return _cli_test_fire(args, out, err)
+
+    if args.command == "budget":
+        return _cli_budget(args, out, err)
 
     if args.command != "tick":
         print(f"unknown command: {args.command}", file=err)

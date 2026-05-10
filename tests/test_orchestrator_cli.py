@@ -636,6 +636,153 @@ class TestTestFire:
 
 
 # ---------------------------------------------------------------------------
+# budget — re-apply the cadence preset table without re-running the interview
+#
+# goal.md (Token frugality): "Add a `/auto-routines budget <tier>` command
+# that re-applies the cadence preset table to the live config + scheduled
+# tasks. Lets the user dial up or down without re-running the full interview."
+#
+# Surface: `python scripts/orchestrator.py budget --config <path> --tier <tier>`
+# Rewrites `meta.budget` + cron expressions for routines named in the
+# preset table for that tier. Untouched routines stay as-is (no silent
+# downgrade of routines the preset doesn't mention).
+# ---------------------------------------------------------------------------
+
+class TestBudget:
+    def _cfg_with_routines(self, tmp_path, routines, meta_extra=None):
+        import yaml
+        cfg = _v4_config(routines)
+        if meta_extra:
+            cfg["meta"].update(meta_extra)
+        p = tmp_path / "config.yaml"
+        p.write_text(yaml.safe_dump(cfg))
+        return p
+
+    def _read(self, path):
+        import yaml
+        return yaml.safe_load(path.read_text())
+
+    def _prd_routine(self):
+        # Mirrors the self-hosted prd-implement entry shape: scheduled
+        # with a trigger { cron, human }.
+        return {
+            "id": "prd-implement",
+            "state": "ACTIVE",
+            "primitive": "scheduled",
+            "trigger": {"cron": "0 */4 * * *", "human": "every 4 hours"},
+            "purpose": "drive PRD",
+            "automation_level": "auto",
+            "execution_surface": "local",
+            "est_minutes": 5,
+        }
+
+    def _commit_tests_routine(self):
+        # git-hook routine — no cron; budget must NOT touch this.
+        return {
+            "id": "commit-tests",
+            "state": "ACTIVE",
+            "primitive": "git-hook",
+            "trigger": {"human": "on every git commit"},
+            "purpose": "test on commit",
+            "automation_level": "auto",
+        }
+
+    def test_budget_medium_writes_meta_budget_field(self, orch, tmp_path):
+        cfg = self._cfg_with_routines(tmp_path, [self._prd_routine()])
+        rc = orch.cli_main(
+            ["budget", "--config", str(cfg), "--tier", "medium"],
+            stdout=io.StringIO(),
+        )
+        assert rc == 0
+        new = self._read(cfg)
+        assert new["meta"]["budget"] == "medium", (
+            "budget command must update meta.budget so subsequent runs "
+            "see the new tier"
+        )
+
+    def test_budget_medium_rewrites_prd_implement_cron(self, orch, tmp_path):
+        """The preset table in SKILL.md says medium / prd-implement →
+        every 12h (`0 */12 * * *`). Pin that the budget command actually
+        applies it."""
+        cfg = self._cfg_with_routines(tmp_path, [self._prd_routine()])
+        rc = orch.cli_main(
+            ["budget", "--config", str(cfg), "--tier", "medium"],
+            stdout=io.StringIO(),
+        )
+        assert rc == 0
+        new = self._read(cfg)
+        prd = next(r for r in new["routines"] if r["id"] == "prd-implement")
+        assert prd["trigger"]["cron"] == "0 */12 * * *", (
+            f"medium / prd-implement should be every 12h, "
+            f"got {prd['trigger']['cron']!r}"
+        )
+        # The human label must move with the cron — silent drift between
+        # the two values is exactly the bug this command is meant to fix.
+        assert "12" in prd["trigger"]["human"], (
+            f"human label must reflect the new cadence, "
+            f"got {prd['trigger']['human']!r}"
+        )
+
+    def test_budget_high_rewrites_prd_implement_to_every_4h(self, orch, tmp_path):
+        # Start in medium so the test demonstrates an *actual* change.
+        prd = self._prd_routine()
+        prd["trigger"]["cron"] = "0 */12 * * *"
+        prd["trigger"]["human"] = "every 12 hours"
+        cfg = self._cfg_with_routines(tmp_path, [prd])
+        rc = orch.cli_main(
+            ["budget", "--config", str(cfg), "--tier", "high"],
+            stdout=io.StringIO(),
+        )
+        assert rc == 0
+        new = self._read(cfg)
+        prd_new = next(r for r in new["routines"] if r["id"] == "prd-implement")
+        assert prd_new["trigger"]["cron"] == "0 */4 * * *"
+        assert "4" in prd_new["trigger"]["human"]
+
+    def test_budget_preserves_unrelated_routines(self, orch, tmp_path):
+        """git-hook routines have no cron and aren't in the preset table.
+        The budget command must NOT touch them — silent rewriting of an
+        unrelated routine is the worst possible failure mode for a
+        config-mutation command."""
+        cfg = self._cfg_with_routines(
+            tmp_path,
+            [self._prd_routine(), self._commit_tests_routine()],
+        )
+        before = self._read(cfg)
+        rc = orch.cli_main(
+            ["budget", "--config", str(cfg), "--tier", "low"],
+            stdout=io.StringIO(),
+        )
+        assert rc == 0
+        after = self._read(cfg)
+        before_ct = next(r for r in before["routines"] if r["id"] == "commit-tests")
+        after_ct = next(r for r in after["routines"] if r["id"] == "commit-tests")
+        assert before_ct == after_ct, (
+            "commit-tests is not in the preset table — budget command "
+            "must leave it byte-identical. Silent rewrites of unrelated "
+            "routines is the bug class this test exists to prevent."
+        )
+
+    def test_budget_rejects_unknown_tier(self, orch, tmp_path):
+        cfg = self._cfg_with_routines(tmp_path, [self._prd_routine()])
+        before = cfg.read_text()
+        err = io.StringIO()
+        rc = orch.cli_main(
+            ["budget", "--config", str(cfg), "--tier", "extreme"],
+            stdout=io.StringIO(),
+            stderr=err,
+        )
+        assert rc != 0, "unknown tier must fail"
+        # Specific named error mentioning the bad value
+        assert "extreme" in err.getvalue() or "tier" in err.getvalue().lower()
+        # Config must be byte-identical — failed validation must not
+        # leave a half-rewritten file on disk.
+        assert cfg.read_text() == before, (
+            "budget must not partially mutate config when tier is invalid"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Subprocess smoke — file is executable as `python scripts/orchestrator.py`
 # ---------------------------------------------------------------------------
 
