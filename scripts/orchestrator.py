@@ -606,6 +606,30 @@ def _make_parser() -> argparse.ArgumentParser:
         "--routine-id", required=True,
         help="Routine id to fire (must exist in config.yaml routines list).",
     )
+
+    # first-pr-eta: surface the first forward-driving routine's next-fire
+    # schedule in the install welcome output. Pure read-only; sources the
+    # `trigger.human` directly from config (sanity-check already pins it
+    # present whenever cron is set). Maps config routine ids → archetype
+    # `category` via the catalog so reactive routines are filtered out.
+    eta_p = sub.add_parser(
+        "first-pr-eta",
+        help="Print a one-line ETA for the first auto-PR a fresh install will open.",
+        description=(
+            "Read config + catalog, find the first routine whose archetype "
+            "has `category: forward-driving`, and print a one-line welcome "
+            "message naming that routine's trigger.human. Used by SKILL.md "
+            "step 8 to give the user a concrete expectation (\"your first "
+            "auto-PR will land at ~6:00 PM\") instead of a generic finish "
+            "line. Pure-script, no LLM tokens."
+        ),
+    )
+    eta_p.add_argument("--config", required=True, help="Path to .iteration/config.yaml")
+    eta_p.add_argument(
+        "--catalog",
+        default=str(pathlib.Path(__file__).resolve().parent.parent / "templates" / "routine-catalog.yaml"),
+        help="Path to templates/routine-catalog.yaml (defaults to the in-tree catalog).",
+    )
     return p
 
 
@@ -725,6 +749,67 @@ def _atomic_write_yaml(path: str, data: dict) -> None:
     os.replace(tmp, p)
 
 
+def _cli_first_pr_eta(args, out, err) -> int:
+    """Print a one-line ETA for the first auto-PR a fresh install will open.
+
+    Reads config + catalog. Finds the first routine whose archetype has
+    `category: forward-driving` (in config order — deterministic, no
+    cron-arithmetic), and prints a one-line welcome message naming that
+    routine's trigger.human. If no forward-driving routine is installed,
+    prints a stub ("reactive-only install") and returns 0 — a
+    reactive-only install is a valid configuration, just not one that
+    auto-opens PRs on a schedule.
+
+    Pure read-only. PRD goal.md (Skill UX): "Surface the first routine
+    PR opened by a fresh install in the welcome output".
+    """
+    try:
+        config = _load_yaml(args.config)
+    except (OSError, Exception) as e:
+        print(f"config load failed: {e}", file=err)
+        return 1
+    try:
+        catalog = _load_yaml(args.catalog)
+    except (OSError, Exception) as e:
+        print(f"catalog load failed: {e}", file=err)
+        return 1
+
+    # Map archetype id → category. Catalog may evolve; default unknown
+    # ids to None so we silently skip them rather than crash on a user
+    # config that references a custom or out-of-tree routine.
+    categories: dict[str, str] = {}
+    for arch in (catalog or {}).get("archetypes", []) or []:
+        rid = arch.get("id")
+        cat = arch.get("category")
+        if rid and cat:
+            categories[rid] = cat
+
+    routines = (config or {}).get("routines", []) or []
+    forward = next(
+        (r for r in routines if categories.get(r.get("id")) == "forward-driving"),
+        None,
+    )
+
+    if forward is None:
+        # Valid config, just no forward-driving routine. Tell the
+        # operator explicitly so the empty ETA doesn't read as a bug.
+        print(
+            "No forward-driving routine installed — reactive-only install. "
+            "Auto-PRs won't open on a schedule; routines fire on commits / "
+            "PR events.",
+            file=out,
+        )
+        return 0
+
+    human = (forward.get("trigger") or {}).get("human") or "(no schedule set)"
+    rid = forward.get("id", "?")
+    print(
+        f"Your first auto-PR (from `{rid}`) will land at: {human}.",
+        file=out,
+    )
+    return 0
+
+
 def _cli_test_fire(args, out, err) -> int:
     """Manual one-shot dispatch plan for `/auto-routines test-fire <id>`.
 
@@ -813,6 +898,9 @@ def cli_main(
 
     if args.command == "budget":
         return _cli_budget(args, out, err)
+
+    if args.command == "first-pr-eta":
+        return _cli_first_pr_eta(args, out, err)
 
     if args.command != "tick":
         print(f"unknown command: {args.command}", file=err)

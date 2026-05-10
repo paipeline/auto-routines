@@ -823,3 +823,222 @@ class TestSubprocessSmoke:
         assert result.returncode == 0, result.stderr
         payload = json.loads(result.stdout)
         assert payload["decisions"][0]["action"] == "fire"
+
+
+# ---------------------------------------------------------------------------
+# first-pr-eta — surface the first forward-driving routine's next fire
+# ---------------------------------------------------------------------------
+# PRD `.iteration/goal.md` (Skill UX): "Surface the first routine PR
+# opened by a fresh install in the welcome output ('your first auto-PR
+# will land at ~6:00 PM')." Step 8 of init invokes this subcommand to
+# render the ETA line — pure-script, no LLM tokens. The routine's
+# stored `trigger.human` is the source of truth (sanity-check pins it
+# present whenever a cron is set), so we read it directly rather than
+# reparse the cron.
+
+class TestFirstPrEta:
+    def _make_catalog(self, tmp_path, archetypes):
+        """Write a minimal catalog with the given archetypes."""
+        import yaml
+        # Each entry: (id, category, primitive)
+        cat = {
+            "archetypes": [
+                {
+                    "id": rid,
+                    "category": category,
+                    "primitive": primitive,
+                    "purpose": "x",
+                    "trigger_default": "test",
+                    "automation_default": "auto",
+                    "self_evolve": False,
+                    "success_criterion": "",
+                    "stack_hints": [],
+                    "prompt_body": "x",
+                }
+                for rid, category, primitive in archetypes
+            ]
+        }
+        p = tmp_path / "catalog.yaml"
+        p.write_text(yaml.safe_dump(cat))
+        return p
+
+    def _make_config(self, tmp_path, routines):
+        """Write a v4 config with the given routines (id, primitive, human)."""
+        import yaml
+        cfg = _v4_config([
+            {
+                "id": rid,
+                "state": "ACTIVE",
+                "primitive": primitive,
+                "trigger": {"cron": "0 9 * * *", "human": human},
+                "purpose": "x",
+                "automation_level": "auto",
+                "execution_surface": "gha",
+                "est_minutes": 5,
+            }
+            for rid, primitive, human in routines
+        ])
+        p = tmp_path / "config.yaml"
+        p.write_text(yaml.safe_dump(cfg))
+        return p
+
+    def test_prints_eta_for_forward_driving_routine(self, orch, tmp_path):
+        """A config with one forward-driving routine must produce a
+        welcome line naming that routine's trigger.human."""
+        catalog = self._make_catalog(
+            tmp_path, [("prd-implement", "forward-driving", "scheduled")]
+        )
+        cfg = self._make_config(
+            tmp_path, [("prd-implement", "scheduled", "every 12 hours")]
+        )
+        out = io.StringIO()
+        rc = orch.cli_main(
+            ["first-pr-eta", "--config", str(cfg), "--catalog", str(catalog)],
+            stdout=out,
+        )
+        assert rc == 0, "subcommand must succeed when a forward-driving routine exists"
+        text = out.getvalue()
+        # PRD's example phrasing: "your first auto-PR will land at ~6:00 PM".
+        # Be loose on exact wording, strict on the schedule appearing.
+        assert "every 12 hours" in text, (
+            "output must include the routine's trigger.human so the "
+            "user knows WHEN to expect the PR — got:\n" + text
+        )
+        # And surface that this is about PR ETA, not just "next fire".
+        text_lower = text.lower()
+        assert "pr" in text_lower, (
+            "output must mention 'PR' so the user knows this is the "
+            "ETA framing, not a generic schedule print"
+        )
+
+    def test_picks_first_forward_driving_routine_in_config_order(
+        self, orch, tmp_path
+    ):
+        """Determinism: when multiple forward-driving routines exist,
+        the subcommand picks the FIRST one in config order. Otherwise
+        the welcome output flips between runs and confuses operators."""
+        catalog = self._make_catalog(
+            tmp_path,
+            [
+                ("prd-implement", "forward-driving", "scheduled"),
+                ("weekly-dep-audit", "forward-driving", "scheduled"),
+                ("daily-digest", "reactive", "scheduled"),
+            ],
+        )
+        cfg = self._make_config(
+            tmp_path,
+            [
+                ("prd-implement", "scheduled", "every 12 hours"),
+                ("weekly-dep-audit", "scheduled", "Mondays 9 AM"),
+                ("daily-digest", "scheduled", "6 PM daily"),
+            ],
+        )
+        out = io.StringIO()
+        rc = orch.cli_main(
+            ["first-pr-eta", "--config", str(cfg), "--catalog", str(catalog)],
+            stdout=out,
+        )
+        assert rc == 0
+        text = out.getvalue()
+        assert "every 12 hours" in text, (
+            "must pick prd-implement (first forward-driving in config "
+            "order) not weekly-dep-audit"
+        )
+        assert "Mondays 9 AM" not in text, (
+            "must not include the second forward-driving routine's "
+            "trigger — output should name exactly one ETA"
+        )
+
+    def test_skips_reactive_routines(self, orch, tmp_path):
+        """Reactive routines (commit-tests, daily-digest, …) don't open
+        PRs on a schedule the user is waiting for. They must not be
+        named in the welcome ETA."""
+        catalog = self._make_catalog(
+            tmp_path,
+            [
+                ("daily-digest", "reactive", "scheduled"),
+                ("commit-tests", "reactive", "git-hook"),
+            ],
+        )
+        cfg = self._make_config(
+            tmp_path,
+            [
+                ("daily-digest", "scheduled", "6 PM daily"),
+                ("commit-tests", "git-hook", "on every commit"),
+            ],
+        )
+        out = io.StringIO()
+        rc = orch.cli_main(
+            ["first-pr-eta", "--config", str(cfg), "--catalog", str(catalog)],
+            stdout=out,
+        )
+        # No forward-driving routines installed — should print a stub
+        # message and exit 0 (not an error: a reactive-only install is
+        # a valid configuration).
+        assert rc == 0
+        text = out.getvalue()
+        assert "6 PM daily" not in text, (
+            "reactive routine's schedule must NOT appear in the ETA"
+        )
+        assert "on every commit" not in text
+        # Stub phrasing: any reasonable "no forward-driving installed"
+        # message.
+        text_lower = text.lower()
+        assert (
+            "no forward-driving" in text_lower
+            or "no forward driving" in text_lower
+            or "react" in text_lower  # "reactive-only install"
+            or "no scheduled pr" in text_lower
+        ), (
+            "must emit a stub when no forward-driving routine is "
+            "installed — silent output looks like the script broke"
+        )
+
+    def test_ignores_routines_missing_from_catalog(self, orch, tmp_path):
+        """A user config can reference routine ids that aren't in the
+        catalog (custom routines, or catalog drift between versions).
+        Those must be silently skipped, not crash the subcommand —
+        the welcome output never blocks install completion."""
+        catalog = self._make_catalog(
+            tmp_path, [("prd-implement", "forward-driving", "scheduled")]
+        )
+        cfg = self._make_config(
+            tmp_path,
+            [
+                ("custom-not-in-catalog", "scheduled", "every 5m"),
+                ("prd-implement", "scheduled", "every 4 hours"),
+            ],
+        )
+        out = io.StringIO()
+        rc = orch.cli_main(
+            ["first-pr-eta", "--config", str(cfg), "--catalog", str(catalog)],
+            stdout=out,
+        )
+        assert rc == 0
+        text = out.getvalue()
+        # Should pick prd-implement (the only one in catalog with
+        # forward-driving category) and ignore custom-not-in-catalog.
+        assert "every 4 hours" in text
+        assert "every 5m" not in text
+
+    def test_outputs_single_line(self, orch, tmp_path):
+        """The welcome ETA must be one line so step 8's printf-style
+        output stays compact. Multi-line output would push the welcome
+        block past one screen."""
+        catalog = self._make_catalog(
+            tmp_path, [("prd-implement", "forward-driving", "scheduled")]
+        )
+        cfg = self._make_config(
+            tmp_path, [("prd-implement", "scheduled", "every 12 hours")]
+        )
+        out = io.StringIO()
+        rc = orch.cli_main(
+            ["first-pr-eta", "--config", str(cfg), "--catalog", str(catalog)],
+            stdout=out,
+        )
+        assert rc == 0
+        # Allow one trailing newline; anything else is multi-line.
+        text = out.getvalue().rstrip("\n")
+        assert "\n" not in text, (
+            f"ETA output must be a single line; got:\n{text!r}"
+        )

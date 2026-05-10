@@ -385,7 +385,20 @@ user is never staring at a silent terminal for more than a few seconds.
    ```
    installed: 4 routines (3 active, 1 git-hook), meta scheduled 9:00 AM daily
    ```
-   Then delete `/tmp/auto-routines-staging-<repo_slug>/`.
+
+   Then surface the first auto-PR ETA (welcome-output guidance, PRD goal.md
+   Skill UX block) — purely so the user has a concrete expectation instead
+   of a generic "install done":
+   ```bash
+   python3 scripts/orchestrator.py first-pr-eta \
+       --config .iteration/config.yaml
+   ```
+   Prints either `Your first auto-PR (from \`<id>\`) will land at: <human>.`
+   or `No forward-driving routine installed — reactive-only install.` Both
+   are valid outcomes; the line goes into the welcome block verbatim. No
+   LLM tokens.
+
+   Finally delete `/tmp/auto-routines-staging-<repo_slug>/`.
 
 ## Mode: `evolve`
 
