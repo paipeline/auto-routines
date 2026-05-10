@@ -179,3 +179,66 @@ class TestPermissions:
             if "permissions" in job:
                 return
         pytest.fail("no permissions: block at workflow or job level")
+
+
+# ---------------------------------------------------------------------------
+# Cache the Claude Code CLI install (OQ1)
+# ---------------------------------------------------------------------------
+# Cold-installing @anthropic-ai/claude-code on every tick costs ~30s.
+# At cron */15 that's ~48 minutes/day of pure waste, eating into the
+# meta.gha_minutes_cap (default 60/day) almost entirely on CLI download.
+# We pin a version + cache the global install dir so the dispatch step
+# becomes ~free on warm runs.
+
+class TestCacheClaudeCli:
+    def test_pins_claude_code_version(self, wf_text):
+        """Cache key must be deterministic — that means pinning the
+        installed version. `latest` would either never invalidate or
+        invalidate every tick depending on how the key is built."""
+        # Pin lives in a job-level env var so install + cache key both
+        # reference the same source of truth.
+        assert "CLAUDE_CODE_VERSION:" in wf_text, (
+            "expected a CLAUDE_CODE_VERSION env binding in the workflow"
+        )
+
+    def test_uses_actions_cache(self, wf_text):
+        """We use actions/cache@v4 explicitly (not the setup-node cache:
+        'npm' shortcut, which only handles project-local node_modules,
+        not global installs)."""
+        assert "actions/cache@v4" in wf_text
+
+    def test_cache_key_references_version_pin(self, wf_text):
+        """Bumping CLAUDE_CODE_VERSION must invalidate the cache. Otherwise
+        the version pin is meaningless — the cache would serve stale
+        binaries forever."""
+        # Look for the env var being interpolated into a cache key. The
+        # cache step has a `key:` field; somewhere on or below it should
+        # interpolate ${{ env.CLAUDE_CODE_VERSION }} or equivalent.
+        assert "env.CLAUDE_CODE_VERSION" in wf_text, (
+            "cache key must interpolate CLAUDE_CODE_VERSION so version "
+            "bumps invalidate the cache"
+        )
+
+    def test_install_is_conditional_on_cache_miss(self, wf_text):
+        """If the cache hits, we should skip `npm install -g` entirely —
+        otherwise the cache saves nothing. Look for some form of guard
+        (cache-hit conditional or a `command -v` check) around the install."""
+        # Two acceptable patterns:
+        #   1. step-level `if: steps.<cache>.outputs.cache-hit != 'true'`
+        #   2. inline shell guard `if ! command -v claude ...`
+        has_step_guard = "cache-hit != 'true'" in wf_text or "cache-hit != \"true\"" in wf_text
+        has_shell_guard = (
+            "command -v claude" in wf_text
+            or "command -v @anthropic-ai/claude-code" in wf_text
+            or "if [ ! -x" in wf_text
+            or "if ! [ -x" in wf_text
+        )
+        assert has_step_guard or has_shell_guard, (
+            "expected the npm install step to skip on cache hit (either "
+            "via a step-level if: cache-hit guard or a shell -x check)"
+        )
+
+    def test_setup_node_present(self, wf_text):
+        """Caching is moot without a node runtime. Pin actions/setup-node
+        so the version is reproducible (the runner default drifts)."""
+        assert "actions/setup-node@v4" in wf_text

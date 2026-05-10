@@ -67,6 +67,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    # Pinned so cache key is deterministic. Bump this manually when we
+    # want to pick up a newer Claude Code CLI; the cache will invalidate
+    # automatically because the key interpolates this value below.
+    env:
+      CLAUDE_CODE_VERSION: "2.1.138"
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -84,6 +90,27 @@ jobs:
 
       - name: Install Python deps
         run: pip install pyyaml
+
+      # Node + npm cache for the Claude Code CLI. We don't have a
+      # package.json so setup-node's `cache: 'npm'` shortcut doesn't apply
+      # — we cache the global install dir (and ~/.npm download cache) by
+      # hand. Cache key includes CLAUDE_CODE_VERSION so version bumps
+      # invalidate cleanly; a stale cache here would silently serve the
+      # wrong CLI binary on every tick.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Cache Claude Code CLI
+        id: claude-cli-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            /usr/local/lib/node_modules/@anthropic-ai
+            /usr/local/bin/claude
+          key: claude-code-cli-v1-${{ runner.os }}-${{ env.CLAUDE_CODE_VERSION }}
 
       # Translate the GH event into the orchestrator's trigger flags.
       # Kept in shell so the YAML stays declarative + the logic is
@@ -192,12 +219,17 @@ jobs:
             echo "No gha-surface routines to fire this tick"
             exit 0
           fi
-          # Install Claude Code CLI on demand. Cache-this in a follow-up
-          # if the cold-install latency hurts.
-          npm install -g @anthropic-ai/claude-code
+          # Install Claude Code CLI only if the cache didn't already
+          # restore a working binary. ~30s saved per warm tick.
+          if [ ! -x /usr/local/bin/claude ]; then
+            echo "Cache miss — installing @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+            npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+          else
+            echo "Cache hit — /usr/local/bin/claude already installed"
+          fi
           for RID in $GHA_FIRES; do
             echo "::group::Dispatching $RID"
-            npx @anthropic-ai/claude-code --headless \
+            claude --headless \
               --dangerously-skip-permissions \
               --skill "$RID" \
               || echo "::warning::Routine $RID exited nonzero"
