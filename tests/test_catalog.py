@@ -819,3 +819,162 @@ class TestDailyDigestShellVariant:
             "catalog header block must document the shell_variant "
             "field so operators understand its purpose"
         )
+
+
+# ---------------------------------------------------------------------------
+# Categories-at-a-glance header block
+# ---------------------------------------------------------------------------
+# PRD `.iteration/goal.md` (Documentation): "Annotate
+# `templates/routine-catalog.yaml` with a header block listing which
+# archetypes are reactive vs. forward-driving (so the interview can
+# group them in the candidate list)."
+#
+# The catalog already has per-archetype `category:` fields. What's
+# missing is a summary block at the top of the file that lists every
+# archetype in its bucket — so a reader skimming the catalog can
+# answer "which are reactive?" without grepping. The interview also
+# benefits: it pulls the bucket list from the header in one read
+# instead of iterating every archetype.
+
+class TestCategoriesAtAGlance:
+    """The header must contain an enumerated summary of every
+    archetype's category — and the summary must match the per-
+    archetype `category` fields exactly."""
+
+    @staticmethod
+    def _header_block(text: str) -> str:
+        """Return the leading comment block (lines starting with `#`
+        or blank) up to the first non-comment, non-blank line — i.e.
+        up to `archetypes:`."""
+        out = []
+        for line in text.splitlines():
+            if line.startswith("#") or line.strip() == "":
+                out.append(line)
+            else:
+                break
+        return "\n".join(out)
+
+    def test_header_has_categories_at_a_glance_section(self, catalog):
+        header = self._header_block(CATALOG_PATH.read_text())
+        header_lower = header.lower()
+        # Look for a header label like "categories at a glance" or
+        # "archetype categories" — any clear marker the reader can
+        # find when skimming.
+        assert (
+            "at a glance" in header_lower
+            or "archetype categories" in header_lower
+            or "categories:" in header_lower
+        ), (
+            "catalog header must contain an at-a-glance section "
+            "enumerating which archetypes are reactive vs "
+            "forward-driving (PRD goal.md Documentation block)"
+        )
+
+    def test_header_lists_every_archetype_under_a_category(self, catalog):
+        """Every archetype in the file must appear in the header
+        summary. If we add a new archetype but forget to add it to the
+        header, the at-a-glance section silently drifts and the
+        interview's candidate grouping goes stale."""
+        header = self._header_block(CATALOG_PATH.read_text())
+        missing = [
+            arch["id"]
+            for arch in catalog["archetypes"]
+            if arch["id"] not in header
+        ]
+        assert not missing, (
+            f"every archetype must be named in the catalog header's "
+            f"at-a-glance block; missing: {missing}"
+        )
+
+    def test_header_assignment_matches_archetype_category(self, catalog):
+        """Each archetype must appear under the bucket matching its
+        own `category` field — header and per-archetype field cannot
+        drift. We detect drift by checking that every archetype name
+        appears *after* the bucket header that matches its category,
+        and *before* the next bucket header (or end of comment block).
+
+        We look for the distinctive bucket-header phrases
+        `reactive (` and `forward-driving (` — those occur in the
+        at-a-glance section's bucket labels, not in the field-doc
+        line that just enumerates valid values (`category: reactive |
+        forward-driving`)."""
+        full_header = self._header_block(CATALOG_PATH.read_text())
+        full_lower = full_header.lower()
+        # Scope to the at-a-glance section — earlier mentions of
+        # archetype ids in the field-doc area (e.g. shell_variant's
+        # `daily-digest` example) should not be treated as the
+        # at-a-glance listing.
+        section_start = max(
+            full_lower.find("at a glance"),
+            full_lower.find("archetype categories"),
+        )
+        assert section_start >= 0, (
+            "header must contain an at-a-glance / archetype-categories "
+            "section to scope this check to"
+        )
+        header = full_header[section_start:]
+        header_lower = header.lower()
+        reactive_idx = header_lower.find("reactive (")
+        forward_idx = header_lower.find("forward-driving (")
+        assert reactive_idx >= 0 and forward_idx >= 0, (
+            "at-a-glance section must contain bucket-section markers "
+            "like `reactive (maintenance lane …)` and `forward-driving "
+            "(progress lane …)` so the buckets are scannable"
+        )
+
+        # Each archetype must appear in the half of the header that
+        # belongs to its declared category. We use the first
+        # occurrence of each archetype id (a header block listing
+        # them once is the simplest layout).
+        # Determine bucket ordering: which label comes first?
+        if reactive_idx < forward_idx:
+            # reactive block is [reactive_idx, forward_idx); forward block is [forward_idx, end)
+            def in_reactive_block(pos: int) -> bool:
+                return reactive_idx <= pos < forward_idx
+            def in_forward_block(pos: int) -> bool:
+                return pos >= forward_idx
+        else:
+            def in_reactive_block(pos: int) -> bool:
+                return pos >= reactive_idx
+            def in_forward_block(pos: int) -> bool:
+                return forward_idx <= pos < reactive_idx
+
+        mismatches: list[str] = []
+        for arch in catalog["archetypes"]:
+            aid = arch["id"]
+            cat = arch.get("category")
+            # Find the first occurrence of the archetype id in the
+            # header. (Multiple occurrences allowed — we just need
+            # the bucket marker to come first.)
+            pos = header.find(aid)
+            if pos < 0:
+                # Already covered by the previous test.
+                continue
+            if cat == "reactive" and not in_reactive_block(pos):
+                mismatches.append(
+                    f"{aid}: declares category=reactive but header lists "
+                    f"it outside the reactive block"
+                )
+            elif cat == "forward-driving" and not in_forward_block(pos):
+                mismatches.append(
+                    f"{aid}: declares category=forward-driving but header "
+                    f"lists it outside the forward-driving block"
+                )
+        assert not mismatches, (
+            "header at-a-glance section disagrees with per-archetype "
+            "category fields:\n  " + "\n  ".join(mismatches)
+        )
+
+    def test_header_block_explains_interview_grouping(self, catalog):
+        """The PRD's motivation is the interview UX — the at-a-glance
+        block isn't just a list, it should remind the reader WHY
+        these are split (the interview groups candidates by bucket).
+        Otherwise a future contributor 'cleans up' the section as
+        redundant with the per-archetype field."""
+        header = self._header_block(CATALOG_PATH.read_text()).lower()
+        assert "interview" in header, (
+            "the at-a-glance section's whole purpose is to feed the "
+            "interview's candidate grouping — the header must mention "
+            "the interview so future contributors don't strip the "
+            "section as 'redundant with the category: field'"
+        )

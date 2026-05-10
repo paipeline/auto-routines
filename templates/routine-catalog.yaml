@@ -40,6 +40,35 @@
 #
 # IMPORTANT: every prompt_body ends by telling the routine to commit on
 # `routines/<id>` and open a PR if `automation_level: auto`. Never push to main.
+#
+# -----------------------------------------------------------------------------
+# Archetype categories at a glance
+# -----------------------------------------------------------------------------
+# The interview reads this block to group candidates into two questions —
+# "what should react?" and "what should push the project forward?" — instead
+# of dumping the full catalog as one flat list. Keep this list in sync with
+# the per-archetype `category:` field; a test pins that drift fails CI.
+#
+# reactive (maintenance lane — fires in response to an event):
+#   - commit-tests           run/fix tests after each commit
+#   - commit-lint            lint+autofix on each commit
+#   - session-test-gap       end-of-session coverage gap sweep
+#   - session-doc-drift      end-of-session doc/code drift sweep
+#   - pr-ci-watcher          react to CI failures on open PRs
+#   - daily-digest           daily summary of commits + PR activity
+#   - meta-evolve            re-tune cadences/budgets from observed signals
+#   - pr-review-bot          inline review on open PR diffs
+#   - coverage-watcher       react to coverage regressions
+#   - secret-scan            block PR merge on leaked credentials
+#   - release-tag-checker    cut/check release tags after a merge
+#
+# forward-driving (progress lane — proactively advances the project):
+#   - prd-implement          implement the next PRD slice
+#   - weekly-dep-audit       propose dependency upgrades
+#
+# Adding a new archetype? Set the `category:` field on the archetype below,
+# add the id to the matching bucket above, and the at-a-glance test stays
+# green.
 
 archetypes:
 

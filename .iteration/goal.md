@@ -25,24 +25,34 @@ broken installs, or routines that drift back to "analyze only."
       without needing a real GitHub PR.
 
 ### Catalog quality
-- [ ] Add a `coverage-watcher` archetype: opens a PR when project test coverage
+- [x] Add a `coverage-watcher` archetype: opens a PR when project test coverage
       drops below threshold (per-language detection: pytest-cov, jest --coverage).
-- [ ] Add a `pr-review-bot` archetype: posts inline review comments on open PRs
+      Shipped — see catalog + `tests/test_catalog.py::test_coverage_watcher_*`.
+- [x] Add a `pr-review-bot` archetype: posts inline review comments on open PRs
       (style, obvious bugs, security smells).
-- [ ] Add a `secret-scan` archetype: catches leaked credentials in a PR and
+      Shipped — see catalog + `tests/test_catalog.py::test_pr_review_bot_*`.
+- [x] Add a `secret-scan` archetype: catches leaked credentials in a PR and
       blocks merge with a comment.
+      Shipped — see catalog + `tests/test_catalog.py::test_secret_scan_*`.
 - [ ] Validate every archetype's `prompt_body` against a fresh temp repo —
       spin one up, run the archetype, assert the expected diff/PR.
 
 ### Skill UX
-- [ ] Better progress reporting during `init` — currently the user sees a long
+- [x] Better progress reporting during `init` — currently the user sees a long
       silence then a wall of status. Stream phase headers as we go.
+      Shipped in SKILL.md step 6/7 + `Progress reporting (applies to every
+      step)` block; pinned by `TestInitProgressStreaming`.
 - [x] `/auto-routines status --routine <id>` to drill into one routine's stats.
       (Implemented in `scripts/status.py --routine <id>`, no LLM tokens.)
-- [ ] `/auto-routines test-fire <routine_id>` to manually fire one routine
+- [x] `/auto-routines test-fire <routine_id>` to manually fire one routine
       without waiting for cron — useful for debugging.
-- [ ] Surface the first routine PR opened by a fresh install in the welcome
+      Shipped as pure-script `scripts/orchestrator.py test-fire`; SKILL.md
+      `Mode: test-fire` wires it to the slash command. Pinned by
+      `TestModeTestFire`.
+- [x] Surface the first routine PR opened by a fresh install in the welcome
       output ("your first auto-PR will land at ~6:00 PM").
+      Shipped as `scripts/orchestrator.py first-pr-eta`; SKILL.md step 8
+      invokes it. Pinned by `tests/test_orchestrator_cli.py::TestFirstPrEta`.
 
 ### Token frugality (added iter-002 — user feedback: skill is consuming too many tokens)
 - [x] `/auto-routines status` MUST be a pure-script call with no Claude tokens.
@@ -50,14 +60,20 @@ broken installs, or routines that drift back to "analyze only."
       Tests in `tests/test_status.py` pin the no-subprocess/no-network contract.
 - [x] Add `meta.budget: low|medium|high|custom` to schema-3 with a cadence
       preset table in SKILL.md. Self-hosted install bumped to `medium`.
-- [ ] Install step 6a should copy `scripts/status.py` from the skill directory
+- [x] Install step 6a should copy `scripts/status.py` from the skill directory
       into the consumer repo so `/auto-routines status` works there too.
       Currently the script only ships in this repo — consumers need it copied
       relative to their repo root. Add to step 6a; cover with an integration
       test that runs `init` against a temp repo and checks the script lands.
-- [ ] `daily-digest` low/medium tier — provide a pure-shell variant that skips
+      Shipped — SKILL.md step 6a copies `scripts/status.py` via
+      `cp "${CLAUDE_SKILL_DIR}/scripts/status.py" scripts/status.py`. Pinned
+      by `TestInstallStep6aCopiesStatusScript`. (Live integration test
+      against /tmp/ still pending — separate PRD item.)
+- [x] `daily-digest` low/medium tier — provide a pure-shell variant that skips
       Claude entirely (just `git log` + `gh pr list` formatted as Markdown).
       Catalog should branch on `meta.budget`.
+      Shipped as `scripts/daily-digest.sh` + `shell_variant:` catalog field.
+      Pinned by `tests/test_daily_digest_shell.py` + `TestDailyDigestShellVariant`.
 - [ ] Add a `/auto-routines budget <tier>` command that re-applies the cadence
       preset table to the live config + scheduled tasks. Lets the user dial up
       or down without re-running the full interview.
@@ -66,12 +82,19 @@ broken installs, or routines that drift back to "analyze only."
       into a single shared file the routine can `cat` once at start.
 
 ### Documentation
-- [ ] Write a "first 24 hours" walkthrough in `docs/first-24h.md`.
-- [ ] Add a troubleshooting page covering the common install failures
+- [x] Write a "first 24 hours" walkthrough in `docs/first-24h.md`.
+      Shipped — 5 milestones (post-install layout, first reactive fire,
+      first scheduled tick, first auto-PR, evolve). Pinned by
+      `tests/test_first_24h_doc.py`.
+- [x] Add a troubleshooting page covering the common install failures
       (`gh` not authed, MCP missing, repo not yet pushed to remote).
-- [ ] Annotate `templates/routine-catalog.yaml` with a header block listing
+      Shipped in `docs/troubleshooting.md`; pinned by
+      `tests/test_troubleshooting_doc.py`.
+- [x] Annotate `templates/routine-catalog.yaml` with a header block listing
       which archetypes are reactive vs. forward-driving (so the interview can
       group them in the candidate list).
+      Shipped in the catalog header (`Archetype categories at a glance`);
+      pinned by `tests/test_catalog.py::TestCategoriesAtAGlance`.
 
 ## Temp project iteration loop
 When `prd-implement` fires and needs to validate a change against a real repo,
