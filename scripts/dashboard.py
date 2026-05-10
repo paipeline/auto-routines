@@ -97,14 +97,42 @@ def _status_block(state: dict, meta: dict) -> list[str]:
     else:
         lines.append(f"- Idle window: `{idle_window}` ({idle_tz})")
 
-    # GHA cost cap
+    # GHA cost cap (PRD #10 user story 30)
+    #
+    # Surface used / cap / remaining on a single line so a user reading
+    # the dashboard sees budget burn before it becomes a surprise bill.
+    # Three states:
+    #   - normal: <pct>% used, remaining shown
+    #   - over: ⚠ icon + "over budget by N min" (silent overshoot is
+    #     the failure mode the story is preventing)
+    #   - cap=0: degenerate config (sanity-check refuses it but a
+    #     corrupt state.json could produce it) — render gracefully
+    #     without dividing by zero.
     used = state.get("gha_minutes_used_today", 0)
     cap = meta.get("gha_minutes_cap", 60)
     reset_date = state.get("gha_minutes_reset_date", "?")
-    pct = (used * 100 // cap) if cap else 0
+    if cap > 0:
+        pct = used * 100 // cap
+        remaining = cap - used
+        if remaining < 0:
+            over = -remaining
+            cost_main = (
+                f"⚠ GHA cost: **{used} / {cap} min** today ({pct}%) — "
+                f"**over budget by {over} min** (0 remaining)"
+            )
+        else:
+            cost_main = (
+                f"GHA cost: **{used} / {cap} min** today ({pct}%) — "
+                f"**{remaining} min remaining**"
+            )
+    else:
+        cost_main = (
+            f"GHA cost: **{used} min** today (cap=0 — budget tracking "
+            "disabled; check `meta.gha_minutes_cap`)"
+        )
     lines.append(
-        f"- GHA cost: **{used} / {cap} min** today ({pct}%) — "
-        f"resets at midnight {idle_tz or 'UTC'} (next: after `{reset_date}`)"
+        f"- {cost_main}, resets at midnight {idle_tz or 'UTC'} "
+        f"(next: after `{reset_date}`)"
     )
     return lines
 

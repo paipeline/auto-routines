@@ -205,6 +205,81 @@ class TestStatus:
         # Should also mention "minutes" so the number isn't ambiguous
         assert "min" in out.lower()
 
+    def test_cost_cap_remaining_shown_explicitly(self, dash):
+        """PRD #10 user story 30: 'I want today's GHA-minutes-used and
+        REMAINING-cap shown, so that I see budget burn before it
+        becomes a surprise bill.' The dashboard already shows used/cap;
+        this pin makes sure the *remaining* number is also rendered.
+        Without it the user has to do mental subtraction every read —
+        defeats the 'glance and know' purpose of the dashboard.
+
+        With used=12, cap=60 → remaining=48 must appear on the cost line.
+        """
+        out = dash.render_dashboard(_state(), _config(), _log(), now=_now())
+        assert "48" in out, (
+            "remaining minutes (cap 60 - used 12 = 48) must appear in the "
+            "dashboard cost block — PRD #10 story 30 calls out remaining-cap "
+            "specifically; computing it client-side defeats the dashboard's "
+            "'glance and know' purpose"
+        )
+        # And it must appear in the same vicinity as the cost numbers,
+        # not just in some unrelated word elsewhere. Pin via "remaining"
+        # keyword which makes the meaning explicit.
+        assert "remaining" in out.lower(), (
+            "the cost line must label the remaining number as 'remaining' "
+            "(or equivalent); a bare '48' is confusing if a future change "
+            "introduces other numbers in the status block"
+        )
+
+    def test_cost_cap_over_budget_warns_loudly(self, dash):
+        """When today's usage already meets-or-exceeds the cap, the
+        dashboard must flag this loudly rather than rendering a
+        misleading 125%-but-quiet number. A user paying for GHA minutes
+        wants to *see* the surprise bill brewing, not hunt for it.
+
+        We assert the loud signal appears specifically *on the cost
+        line* (the line containing both the used and cap numbers),
+        not anywhere in the body — `overwritten` in the footer would
+        otherwise satisfy a naive 'over' substring search.
+        """
+        out = dash.render_dashboard(
+            _state(gha_minutes_used_today=75),  # cap is 60 → 25% over
+            _config(),
+            _log(),
+            now=_now(),
+        )
+        # Find the cost line — it has both 75 and 60 on the same line.
+        cost_lines = [
+            line for line in out.splitlines()
+            if "75" in line and "60" in line
+        ]
+        assert cost_lines, (
+            f"could not find the GHA cost line in the dashboard output; "
+            f"expected a line containing both '75' (used) and '60' (cap)"
+        )
+        cost_line = cost_lines[0].lower()
+        loud = "⚠" in cost_lines[0] or "over" in cost_line or "exceeded" in cost_line
+        assert loud, (
+            f"75/60 min today must put a visible warning symbol or phrase "
+            f"on the cost line itself (silent overshoot is the bug story 30 "
+            f"is trying to prevent); got line: {cost_lines[0]!r}"
+        )
+
+    def test_cost_cap_zero_cap_does_not_crash(self, dash):
+        """Defensive: a misconfigured cap=0 must not divide-by-zero.
+        Sanity-check refuses 0 in config validation, but the dashboard
+        is reading from raw state — the orchestrator should never
+        produce this, but a corrupt state.json or a partial migration
+        could. Render must succeed (degraded) rather than 500."""
+        cfg = _config()
+        cfg["meta"]["gha_minutes_cap"] = 0
+        # Should not raise.
+        out = dash.render_dashboard(_state(), cfg, _log(), now=_now())
+        # And the cost block should still render *something* — pin that
+        # 'GHA' (or 'cost') still appears, so the section isn't dropped
+        # silently when cap is degenerate.
+        assert "gha" in out.lower() or "cost" in out.lower()
+
 
 # ---------------------------------------------------------------------------
 # Routines table
