@@ -58,6 +58,7 @@ Detect mode from the user's invocation:
 | `revert <iter-NNN>`                        | `revert`| `git revert` back to the named checkpoint. Reconcile tasks afterwards.    |
 | `test-fire <routine_id>`                   | `test-fire` | Print the dispatch plan for one routine. Pure-script, no LLM tokens.  |
 | `budget <low\|medium\|high\|custom>`         | `budget`| Re-apply the cadence preset table to the live config. Pure-script, no LLM tokens. |
+| `cadence <routine_id> <cron>`              | `cadence`| Retune one routine's cron without touching the tier. Pure-script, no LLM tokens. |
 
 ## Guardrails (apply to every mode)
 
@@ -690,6 +691,60 @@ install). For each warning line, surface it to the user and suggest
 re-running install for the affected routine. Do NOT scan the config
 yourself — the plan is the contract; scanning duplicates work the CLI
 already did and risks silent drift between config + MCP.
+
+## Mode: `cadence <routine_id> <cron>`
+
+**This mode does not spawn an LLM.** It's the per-routine slider that
+sits underneath `budget` — retune *one* routine's cron without
+bumping the whole tier or hand-editing YAML. Issue #83 (PRD #74).
+
+```bash
+python3 scripts/orchestrator.py cadence \
+    --config .iteration/config.yaml \
+    --routine <routine_id> \
+    --cron "<new cron expression>"
+```
+
+What it does:
+
+- Validates the routine id exists in `config.routines[]`. Unknown id
+  → rc=1 with a list of valid ids.
+- Validates the cron parses (5 fields, standard `*` / `N` / `N-M` /
+  `N,M,K` / `*/N` syntax). Garbage → rc=1 with a parser error.
+- Validates the new cron fits the current `meta.budget` tier's daily-
+  fire cap:
+
+  | tier   | daily-fire cap | rationale                                  |
+  | ------ | -------------- | ------------------------------------------ |
+  | low    | ≤ 1   /day     | matches `weekdays 9 AM` preset (0.71/day)  |
+  | medium | ≤ 4   /day     | matches `every 12 hours` preset (2/day)    |
+  | high   | ≤ 24  /day     | matches `every 4 hours` preset (6/day)     |
+  | custom | unlimited      | escape hatch — opt out of the cap          |
+
+  Exceeded → rc=1 with a clear error pointing the user at `budget`
+  for tier bumps. Caps are pinned in `BUDGET_TIER_DAILY_CAP` in
+  `scripts/orchestrator.py`.
+- Rewrites `routines[i].trigger.{cron,human}` atomically (tempfile
+  + `os.replace`); regenerates the `human` label from the new cron
+  so the status table stays honest.
+- Emits an `mcp-plan:` block (same shape `budget` uses) with one JSON
+  line for the touched routine when it has a stored `task_id`. For
+  git-hook / hook / loop / pr-poll routines (no MCP task), emits a
+  `# warn:` line explaining the YAML override is documentation only.
+- Echoes the before/after cron + the tier cap so the user can
+  confirm what changed.
+
+For every JSON line in the `mcp-plan:` block, call:
+
+```
+mcp__scheduled-tasks__update_scheduled_task(task_id=<task_id>, schedule=<cron>)
+```
+
+Skip and surface `# warn:` lines as with `budget` above. Tests in
+`tests/test_orchestrator_cadence.py` pin 21 invariants (cron parser
+fires-per-day arithmetic, per-tier cap acceptance / rejection,
+atomic write, unknown id ↔ valid ids error, mcp-plan shape, and
+the SKILL.md doc drift check pointing back at this section).
 
 ## Mode: `stop <routine_id>`
 

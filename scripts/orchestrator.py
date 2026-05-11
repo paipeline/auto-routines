@@ -1329,6 +1329,44 @@ def _make_parser() -> argparse.ArgumentParser:
             "subcommand only prints what it would install."
         ),
     )
+
+    # cadence: per-routine cron override. Issue #83 (PRD #74).
+    # Today's only retuning paths are `budget low|medium|high` (bulk
+    # re-apply, all routines) and hand-editing the YAML. This adds
+    # the per-routine slider that's been a UX gap.
+    cadence_p = sub.add_parser(
+        "cadence",
+        help="Override one routine's cron without bumping the whole tier.",
+        description=(
+            "Retune a single routine's cron expression without "
+            "touching the other routines. Validates the routine "
+            "exists, the cron parses, and the new cron respects "
+            "the current budget tier's daily-fire cap. On success, "
+            "rewrites config.yaml atomically and emits an `mcp-plan:` "
+            "block so the SKILL.md `Mode: cadence` flow can dispatch "
+            "the MCP reschedule the same way `budget` does."
+        ),
+    )
+    cadence_p.add_argument(
+        "--config", required=True,
+        help="Path to .iteration/config.yaml",
+    )
+    cadence_p.add_argument(
+        "--routine", required=True,
+        help=(
+            "Routine id to retune (must exist in config.routines[]). "
+            "Unknown ids fail with rc=1 and a list of valid ids."
+        ),
+    )
+    cadence_p.add_argument(
+        "--cron", required=True,
+        help=(
+            "New cron expression (5 fields: minute hour dom month dow). "
+            "Must parse and must fit the current budget tier's daily-"
+            "fire cap (low ≤ 1, medium ≤ 4, high ≤ 24, custom unlimited)."
+        ),
+    )
+
     return p
 
 
@@ -1686,6 +1724,239 @@ def _cli_recompute_cadence(args, out, err) -> int:
     )
     for rid, (cron, human) in changes.items():
         out.write(f"  {rid}: cron={cron!r} ({human})\n")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Cadence CLI (issue #83) — per-routine cron override
+# cron helper — small enough to inline rather than add a `croniter` dep.
+# Handles the 5-field standard cron expressions we use in BUDGET_PRESETS:
+#   *, N, N-M, N,M,K, */N
+# Used by the cadence command's tier-cap check (issue #83).
+# ---------------------------------------------------------------------------
+
+def _cron_field_matches(field: str, value: int, lo: int, hi: int) -> bool:
+    """True if `value` (already in [lo, hi]) matches a single cron
+    field's expression. Recursive on comma lists."""
+    if "," in field:
+        return any(_cron_field_matches(part, value, lo, hi) for part in field.split(","))
+    if field == "*":
+        return True
+    if field.startswith("*/"):
+        step_s = field[2:]
+        if not step_s.isdigit() or int(step_s) <= 0:
+            raise ValueError(f"invalid step in cron field {field!r}")
+        step = int(step_s)
+        # */N counts from lo: (value - lo) divisible by step.
+        return (value - lo) % step == 0
+    if "-" in field:
+        a_s, b_s = field.split("-", 1)
+        if not (a_s.isdigit() and b_s.isdigit()):
+            raise ValueError(f"invalid range in cron field {field!r}")
+        a, b = int(a_s), int(b_s)
+        return a <= value <= b
+    if not field.isdigit():
+        raise ValueError(f"invalid cron field {field!r}")
+    return int(field) == value
+
+
+def _cron_matches_minute(cron: str, dt: dt.datetime) -> bool:
+    fields = cron.split()
+    if len(fields) != 5:
+        raise ValueError(
+            f"cron must have 5 fields (minute hour dom month dow); "
+            f"got {len(fields)} in {cron!r}"
+        )
+    minute_f, hour_f, dom_f, month_f, dow_f = fields
+    # `weekday()` returns Mon=0..Sun=6. Standard cron has Sun=0..Sat=6
+    # (and many implementations also accept Sun=7). We support both:
+    # cron dow=0 or 7 → Sun, dow=1..6 → Mon..Sat.
+    py_dow = dt.weekday()
+    cron_dow = (py_dow + 1) % 7  # Mon=1..Sun=0
+    # If the field literally contains 7, also accept that as Sun.
+    dow_match = _cron_field_matches(dow_f, cron_dow, 0, 7)
+    if not dow_match and "7" in dow_f:
+        dow_match = _cron_field_matches(dow_f, 7, 0, 7)
+    return (
+        _cron_field_matches(minute_f, dt.minute, 0, 59)
+        and _cron_field_matches(hour_f, dt.hour, 0, 23)
+        and _cron_field_matches(dom_f, dt.day, 1, 31)
+        and _cron_field_matches(month_f, dt.month, 1, 12)
+        and dow_match
+    )
+
+
+def cron_fires_per_day(cron: str) -> float:
+    """Return the average number of times `cron` fires per day,
+    averaged over a representative 7-day window. Used by the cadence
+    command to enforce per-tier daily-fire caps.
+
+    Raises ValueError if `cron` is malformed (wrong field count,
+    garbage tokens). Exposed at module top-level so tests can pin
+    behavior independently of the CLI."""
+    # 2024-01-15 is a Monday; the 7-day window covers every weekday
+    # so weekly schedules (Mon-Fri 9 AM) average correctly.
+    base = dt.datetime(2024, 1, 15, 0, 0)
+    count = 0
+    for m in range(7 * 1440):
+        if _cron_matches_minute(cron, base + dt.timedelta(minutes=m)):
+            count += 1
+    return count / 7.0
+
+
+# Per-tier daily-fire cap. Chosen so the existing BUDGET_PRESETS fit
+# their own tier (low's `weekdays 9 AM` = 5/7 ≈ 0.71 < 1; medium's
+# `every 12 hours` = 2 < 4; high's `every 4 hours` = 6 < 24) with
+# headroom for hand-tuning. `custom` is unlimited — the escape hatch.
+BUDGET_TIER_DAILY_CAP: dict[str, float] = {
+    "low": 1.0,
+    "medium": 4.0,
+    "high": 24.0,
+    "custom": float("inf"),
+}
+
+
+def _cron_to_human(cron: str) -> str:
+    """Render a 5-field cron expression to a short human label for
+    the status table. Best-effort for the patterns BUDGET_PRESETS
+    uses; falls back to the raw cron for anything exotic so the
+    status table never displays a misleading approximation."""
+    fields = cron.split()
+    if len(fields) != 5:
+        return cron
+    minute, hour, dom, month, dow = fields
+    # `0 */N * * *` → every N hours
+    if minute == "0" and hour.startswith("*/") and dom == month == dow == "*":
+        return f"every {hour[2:]} hours"
+    # `*/N * * * *` → every N minutes
+    if minute.startswith("*/") and hour == "*" and dom == month == dow == "*":
+        return f"every {minute[2:]} minutes"
+    # `0 H * * *` → daily at H:00
+    if minute == "0" and hour.isdigit() and dom == month == dow == "*":
+        h = int(hour)
+        period = "AM" if h < 12 else "PM"
+        h12 = h if 1 <= h <= 12 else (h - 12 if h > 12 else 12)
+        return f"{h12}:00 {period} daily"
+    # `0 H * * 1-5` → weekdays at H:00
+    if minute == "0" and hour.isdigit() and dom == "*" and month == "*" and dow == "1-5":
+        h = int(hour)
+        period = "AM" if h < 12 else "PM"
+        h12 = h if 1 <= h <= 12 else (h - 12 if h > 12 else 12)
+        return f"weekdays {h12}:00 {period}"
+    return cron
+
+
+def _cli_cadence(args, out, err) -> int:
+    """Retune a single routine's cron (issue #83).
+
+    Validation order:
+      1. Routine id exists.
+      2. Cron parses.
+      3. New cron fits the current budget tier's daily-fire cap.
+
+    On success, rewrites trigger.cron + trigger.human atomically and
+    emits an `mcp-plan:` block (same shape `budget` uses) so the
+    skill consumer can dispatch the MCP retune.
+    """
+    try:
+        config = _load_yaml(args.config)
+    except (OSError, Exception) as e:
+        print(f"config load failed: {e}", file=err)
+        return 1
+
+    if config is None:
+        print(f"config is empty: {args.config}", file=err)
+        return 1
+
+    routines = config.get("routines", []) or []
+
+    # 1. Routine must exist.
+    target = next((r for r in routines if r.get("id") == args.routine), None)
+    if target is None:
+        valid_ids = sorted(r.get("id", "") for r in routines)
+        ids_listing = ", ".join(valid_ids) if valid_ids else "(none)"
+        print(
+            f"cadence: no routine with id={args.routine!r}. "
+            f"Valid ids: {ids_listing}",
+            file=err,
+        )
+        return 1
+
+    # 2. Cron must parse.
+    new_cron = args.cron.strip()
+    try:
+        fires_per_day = cron_fires_per_day(new_cron)
+    except ValueError as e:
+        print(f"cadence: invalid cron {new_cron!r}: {e}", file=err)
+        return 1
+
+    # 3. Tier cap.
+    tier = ((config.get("meta") or {}).get("budget") or "medium").lower()
+    cap = BUDGET_TIER_DAILY_CAP.get(tier)
+    if cap is None:
+        # Unknown tier in config — treat as medium and warn rather
+        # than reject (the cadence command's contract is per-routine,
+        # not per-tier).
+        cap = BUDGET_TIER_DAILY_CAP["medium"]
+        print(
+            f"# warn: unknown budget tier {tier!r} in config; "
+            f"treating as medium (cap {cap}/day)",
+            file=out,
+        )
+    if fires_per_day > cap:
+        print(
+            f"cadence: cron {new_cron!r} fires "
+            f"{fires_per_day:.2f}/day, which exceeds the "
+            f"{tier!r} tier cap of {cap}/day. Raise the tier first "
+            f"with `python3 scripts/orchestrator.py budget --config "
+            f"{args.config} --tier <higher>` (or set tier=custom to "
+            f"opt out of the cap).",
+            file=err,
+        )
+        return 1
+
+    # All validation passed — rewrite the routine's trigger.
+    before_cron = (target.get("trigger") or {}).get("cron", "(none)")
+    trigger = target.setdefault("trigger", {})
+    trigger["cron"] = new_cron
+    trigger["human"] = _cron_to_human(new_cron)
+
+    try:
+        _atomic_write_yaml(args.config, config)
+    except OSError as e:
+        print(f"config write failed: {e}", file=err)
+        return 1
+
+    out.write(
+        f"# cadence: routine {args.routine!r} retuned\n"
+        f"# before: {before_cron}\n"
+        f"# after:  {new_cron}\n"
+        f"# human:  {trigger['human']}\n"
+        f"# tier:   {tier} (cap {cap}/day; this cron is {fires_per_day:.2f}/day)\n"
+    )
+
+    # MCP plan emission. If the routine has a stored task_id, emit a
+    # JSON line the SKILL.md consumer can pipe to
+    # `mcp__scheduled-tasks__update_scheduled_task`. If not (git-hook,
+    # hook, loop, pr-poll), emit a warning so the user knows the
+    # YAML override isn't backed by a live MCP reschedule.
+    out.write("mcp-plan:\n")
+    task_id = target.get("task_id")
+    if task_id:
+        out.write(json.dumps({
+            "routine_id": args.routine,
+            "task_id": task_id,
+            "cron": new_cron,
+            "human": trigger["human"],
+        }, sort_keys=True) + "\n")
+    else:
+        out.write(
+            f"# warn: routine {args.routine!r} has no stored task_id "
+            f"(primitive={target.get('primitive', '?')!r}); the YAML "
+            f"override is documentation only — no live MCP "
+            f"reschedule will happen.\n"
+        )
+
     return 0
 
 
@@ -3133,6 +3404,9 @@ def cli_main(
 
     if args.command == "recompute-cadence":
         return _cli_recompute_cadence(args, out, err)
+
+    if args.command == "cadence":
+        return _cli_cadence(args, out, err)
 
     if args.command == "first-pr-eta":
         return _cli_first_pr_eta(args, out, err)
