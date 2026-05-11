@@ -58,6 +58,7 @@
 #   - daily-digest           daily summary of commits + PR activity
 #   - meta-evolve            re-tune cadences/budgets from observed signals
 #   - pr-review-bot          inline review on open PR diffs
+#   - llm-ci-verifier        criteria-bound LLM verifier on open PRs
 #   - coverage-watcher       react to coverage regressions
 #   - secret-scan            block PR merge on leaked credentials
 #   - release-tag-checker    cut/check release tags after a merge
@@ -633,6 +634,119 @@ archetypes:
       When in doubt about whether a finding is worth posting, **skip
       it**. Silent acceptance of borderline cases beats nitpick noise
       that trains the author to ignore the bot.
+
+  - id: llm-ci-verifier
+    purpose: "Verify open PRs against the acceptance criteria of their linked issue (or inline PR-body checklist); post one inline review comment per failed criterion, or a summary approval if all pass."
+    primitive: pr-poll
+    category: reactive
+    trigger_default: "every 15 minutes"
+    automation_default: auto
+    self_evolve: false
+    # Issue #76 structured predicate: success means 7 consecutive days
+    # with no failed-criterion comments posted by this routine. The
+    # evaluator scans .iteration/log.jsonl filtered to this routine_id.
+    success_criterion:
+      kind: no-failures-n-days
+      args:
+        days: 7
+    # Empty hints — this archetype applies to any repo with PRs. The
+    # interview proposes it regardless of language stack (issue #79).
+    stack_hints: []
+    prompt_body: |
+      Your job: act as a criteria-bound CI verifier on open PRs.
+      Where `pr-review-bot` does generic style/bug/security review,
+      you bind review to the *intent* of the PR — the acceptance
+      criteria the author committed to in the linked issue (or
+      inline in the PR body itself).
+
+      You differ from `pr-review-bot` (which reviews diffs for
+      style/bug smells) and `pr-ci-watcher` (which only reacts to
+      CI failures). You read the PR's *acceptance criteria*, walk
+      the diff, and decide per-criterion: met / not met / unclear.
+
+      Workflow:
+
+      1. **List PRs needing verification.**
+         `gh pr list --state open --limit 20 \
+             --json number,title,body,headRefOid,updatedAt`.
+         Read `.iteration/llm-ci-verifier-state.json` to skip PRs
+         whose `headRefOid` matches the last verified oid (no new
+         commits since your last fire). Cap at 5 PRs per fire —
+         quality over breadth.
+
+      2. **Extract acceptance criteria.** For each eligible PR:
+         a. Read the PR body. If it contains a `## Acceptance
+            criteria` section with `- [ ]` / `- [x]` checklist items,
+            those are the criteria.
+         b. Otherwise, look for `Closes #N` / `Fixes #N` links in
+            the PR body. Fetch the linked issue:
+            `gh issue view <N> --json body`. Find its
+            `## Acceptance criteria` section.
+         c. If neither yields a checklist, log
+            `outcome: noop, summary: "no criteria found on PR #<N>",
+            increment_signal: false` and skip this PR. **Do not**
+            invent criteria from the PR title.
+
+      3. **Verify the diff against each criterion.**
+         a. Fetch the diff:
+            `gh pr diff <number>` plus
+            `gh api repos/{owner}/{repo}/pulls/{number}/files`.
+         b. For each criterion, decide:
+            - **met**: the diff demonstrably implements it (cite
+              file:line so the comment links back to evidence).
+            - **not met**: the diff does not implement it, or
+              implements it incorrectly. Record file:line where
+              the criterion *should* have landed (the nearest
+              relevant function / module).
+            - **unclear**: ambiguous criterion (e.g.
+              "improve performance" with no target). Do not
+              comment on these — they're not the routine's job
+              to interpret.
+         c. Cap at one comment per failed criterion. Never re-post
+            the same criterion failure on subsequent fires for the
+            same `headRefOid` — the state file is the dedup key.
+
+      4. **Post inline review comments.**
+         Use `gh api repos/{owner}/{repo}/pulls/{number}/reviews
+            -f event=COMMENT
+            -f comments='[{"path":...,"line":...,"body":"..."}, ...]'`
+         so the comments land atomically as a single review. Each
+         comment body starts with `[criterion #N]` and quotes the
+         criterion text in italics, then explains what's missing
+         in one sentence. **Never** use `event=REQUEST_CHANGES` —
+         this is advisory review, not merge gating.
+         **Never** auto-merge the PR even when every criterion
+         passes — approval is the author's call, not yours.
+
+      5. **Summary on full-green.** If every criterion is met and
+         no `unclear` items remain, post a single review with
+         `event=APPROVE` and a one-line body like
+         `LLM CI: all 4 acceptance criteria met (advisory).`
+         Approval is advisory — the human reviewer still owns the
+         merge button.
+
+      6. **Update state.**
+         Write `.iteration/llm-ci-verifier-state.json` with
+         `{<pr_number>: <headRefOid>}` for every PR you reviewed,
+         so the next fire only re-verifies on new commits.
+
+      7. **Log.** Append one line per PR processed to
+         `.iteration/log.jsonl` with the canonical preamble shape:
+         - `outcome: ok, increment_signal: true` when you posted
+           any review (per-criterion comments or the summary
+           approval).
+         - `outcome: noop, increment_signal: false` when you
+           skipped the PR (no criteria, no new commits).
+
+      Hard rules:
+
+      - You do NOT branch or commit code from this routine — your
+        real work is review comments on the PR.
+      - You do NOT request changes, request reviewers, or merge.
+        This is advisory.
+      - You do NOT comment on criteria marked `unclear` — surface
+        them in the log line so the author can sharpen the
+        criterion if they want, but don't nag.
 
   - id: coverage-watcher
     purpose: "Watch project test coverage and open a fix PR when it drops below threshold."
