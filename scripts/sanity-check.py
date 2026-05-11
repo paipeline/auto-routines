@@ -79,6 +79,20 @@ ROUTINE_STATES = {
 TERMINAL_STATES = {"STOPPED"}                              # cannot leave
 PAUSED_STATES = {"STAGNANT", "COMPLETED"}                  # re-openable
 FIRING_STATES = {"ACTIVE", "EVOLVING"}                     # routine may fire
+# Sealed union of allowed `success_criterion.kind` values. Mirrors
+# `scripts/orchestrator.py::PREDICATE_KINDS`. The drift detector in
+# `tests/test_preamble_predicates_matches_sanity.py` pins both
+# constants and the preamble docs together — if they diverge, the
+# validator rejects configs the orchestrator can serve (or accepts
+# configs the orchestrator can't evaluate). frozenset so a downstream
+# import can't accidentally widen the union.
+PREDICATE_KINDS = frozenset({
+    "all-tasks-checked",
+    "coverage-above",
+    "pr-merged-count",
+    "no-failures-n-days",
+    "llm-narrative",
+})
 SLUG_MAX = 32          # keep room for "auto-routines-" prefix and "-<routine_id>" suffix
 TASK_ID_MAX = 100      # MCP-side reasonable bound
 
@@ -245,6 +259,36 @@ def check(config: dict) -> list[str]:
             st = r["stagnation_threshold"]
             if not isinstance(st, int) or st < 1:
                 errors.append(f"{prefix} stagnation_threshold must be a positive integer")
+        # success_criterion — accept either legacy free-text prose
+        # (auto-wrapped at orchestrator load time into
+        # `{kind: llm-narrative, args: {prose: <text>}}`) or the
+        # structured `{kind, args}` union. Unknown kinds are rejected
+        # here so a typo surfaces at sanity-check time rather than at
+        # evolve time. Empty/missing field is fine (routine runs
+        # indefinitely).
+        if "success_criterion" in r:
+            sc = r["success_criterion"]
+            if sc is None or isinstance(sc, str):
+                pass  # legacy prose — auto-wrapped by orchestrator
+            elif isinstance(sc, dict):
+                kind = sc.get("kind")
+                if kind not in PREDICATE_KINDS:
+                    errors.append(
+                        f"{prefix} success_criterion.kind must be one of "
+                        f"{sorted(PREDICATE_KINDS)}, got {kind!r}"
+                    )
+                args = sc.get("args", {})
+                if args is not None and not isinstance(args, dict):
+                    errors.append(
+                        f"{prefix} success_criterion.args must be a mapping, "
+                        f"got {type(args).__name__}"
+                    )
+            else:
+                errors.append(
+                    f"{prefix} success_criterion must be a string (legacy "
+                    f"prose) or a mapping with `kind` and `args`, got "
+                    f"{type(sc).__name__}"
+                )
         # execution_surface (schema 4+): which surface this routine fires on.
         # Only scheduled/pr-poll need it — hook/git-hook always run in-session.
         if "execution_surface" in r:
