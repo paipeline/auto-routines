@@ -106,6 +106,47 @@ State transitions are owned by the `evolve` routine (see SKILL.md
 Never transition your own state. Only `evolve` rewrites
 `config.yaml > routines[].state`.
 
+## Success criteria
+
+A routine's `success_criterion` is what tells the orchestrator when to
+transition you ACTIVE → COMPLETED — your work is done; stop firing.
+The field is a sealed union: pick one of the structured `kind`s below
+where you can, and fall back to `llm-narrative` only when the criterion
+is genuinely unstructured prose.
+
+```yaml
+success_criterion:
+  kind: all-tasks-checked         # structured — orchestrator-enforced
+  args:
+    file: .iteration/goal.md
+```
+
+The orchestrator handles these kinds:
+
+- `all-tasks-checked` — reads `args.file` (default `.iteration/goal.md`)
+  and counts `[x]` vs `[ ]` markdown checkboxes. COMPLETED when every
+  checkbox is checked AND there is at least one. Empty files never
+  complete (otherwise a fresh install would auto-shut-down every
+  routine before the user wrote their goal).
+- `coverage-above` — `args.threshold` (percent, e.g. `80`) holding for
+  `args.window` consecutive fires. (Evaluator lands in issue #76.)
+- `pr-merged-count` — at least `args.count` PRs from this routine have
+  merged. (Evaluator lands in issue #76.)
+- `no-failures-n-days` — no `outcome: err` entries in this routine's
+  log for the last `args.days` days. (Evaluator lands in issue #76.)
+- `llm-narrative` — fallback for unstructured criteria. The
+  meta-agent reads `args.prose` and decides. Backward compat: an
+  older string-valued `success_criterion` is auto-wrapped into
+  `{kind: llm-narrative, args: {prose: <text>}}` at load time, so no
+  config edit is required to upgrade.
+
+The validator (`scripts/sanity-check.py`) rejects any other `kind`.
+Add a new kind by editing `PREDICATE_KINDS` in both `sanity-check.py`
+and `scripts/orchestrator.py`, adding an evaluator branch in
+`evaluate_success_criterion()`, and updating this section — the
+drift detector in `tests/test_preamble_predicates_matches_sanity.py`
+pins all three surfaces together.
+
 ## Failure modes
 
 - **Missing dep** (`gh`, an MCP, a CLI tool not on PATH): log

@@ -23,7 +23,8 @@ from __future__ import annotations
 import datetime as dt
 import fnmatch
 import re
-from typing import Any
+import pathlib
+from typing import Any, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
@@ -31,7 +32,33 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 # has zero imports from the rest of the repo (the test pins both).
 FIRING_STATES: frozenset = frozenset({"ACTIVE", "EVOLVING"})
 
+# Sealed union of `success_criterion.kind` values. Mirrored in
+# `scripts/sanity-check.py::PREDICATE_KINDS` and documented in
+# `templates/routine-preamble.md::## Success criteria`. The drift
+# detector in `tests/test_preamble_predicates_matches_sanity.py`
+# pins all three surfaces together.
+#
+# - `all-tasks-checked` — orchestrator-enforced (issue #75)
+# - `coverage-above` / `pr-merged-count` / `no-failures-n-days` —
+#   declared here, evaluator branches land in issue #76
+# - `llm-narrative` — fallback for unstructured prose; the
+#   evaluator returns None so the meta-agent (LLM) handles it
+PREDICATE_KINDS: frozenset = frozenset({
+    "all-tasks-checked",
+    "coverage-above",
+    "pr-merged-count",
+    "no-failures-n-days",
+    "llm-narrative",
+})
+
 _IDLE_WINDOW_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$")
+# Matches a GitHub-flavoured-markdown task list checkbox at the start
+# of a (possibly indented) line: `- [ ]`, `- [x]`, `- [X]`, also `* [x]`,
+# `+ [x]`, and ordered-list variants like `1. [x]`.
+_TASK_CHECKBOX_RE = re.compile(
+    r"^\s*(?:[-*+]|\d+\.)\s+\[(?P<mark>[ xX])\]\s",
+    re.M,
+)
 
 
 def _to_zone(now: dt.datetime, tz_name: str) -> dt.datetime:
@@ -119,6 +146,138 @@ def is_firing_state(state: Any) -> bool:
     Defensive: any non-string or unrecognized state returns False rather
     than raising — the orchestrator should skip-with-reason, not crash."""
     return state in FIRING_STATES
+
+
+# ---------------------------------------------------------------------------
+# success_criterion — structured predicate union (issue #75)
+# ---------------------------------------------------------------------------
+
+
+def normalize_success_criterion(value: Any) -> Optional[dict]:
+    """Coerce a `success_criterion` field into the canonical
+    `{kind, args}` shape, or None if the field is absent.
+
+    Three input shapes are accepted:
+
+    - `None`               → `None` (no criterion; routine runs forever)
+    - `"<prose>"` (str)    → `{kind: 'llm-narrative', args: {prose: <prose>}}`
+      This is the backward-compat path — every existing routine config
+      carries free-text prose in this field.
+    - `{kind, args}` dict  → passed through after kind validation; if
+      `args` is missing it defaults to `{}` (predicate evaluator
+      supplies per-kind defaults).
+
+    An unknown `kind` raises `ValueError` so the bug surfaces at
+    config-load time instead of at evolve time."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        # Round-trip even empty strings — the evaluator turns them back
+        # into "no predicate" via the empty-prose check.
+        return {"kind": "llm-narrative", "args": {"prose": value}}
+    if isinstance(value, dict):
+        kind = value.get("kind")
+        if kind not in PREDICATE_KINDS:
+            raise ValueError(
+                f"success_criterion.kind must be one of "
+                f"{sorted(PREDICATE_KINDS)}, got {kind!r}"
+            )
+        args = value.get("args")
+        if args is None:
+            args = {}
+        elif not isinstance(args, dict):
+            raise ValueError(
+                f"success_criterion.args must be a mapping, got {type(args).__name__}"
+            )
+        return {"kind": kind, "args": args}
+    raise ValueError(
+        f"success_criterion must be a string, mapping, or null; got "
+        f"{type(value).__name__}"
+    )
+
+
+def _count_checkbox_completion(text: str) -> tuple[int, int]:
+    """Return `(checked, total)` GFM task-list checkboxes in `text`.
+
+    Both `[x]` and `[X]` count as checked. Indented sub-tasks count too —
+    a PRD with `- [x] top\\n  - [x] sub\\n` has total=2, checked=2."""
+    total = 0
+    checked = 0
+    for m in _TASK_CHECKBOX_RE.finditer(text):
+        total += 1
+        if m.group("mark") in ("x", "X"):
+            checked += 1
+    return checked, total
+
+
+def _eval_all_tasks_checked(args: dict, context: dict) -> bool:
+    """`all-tasks-checked` — True iff the referenced markdown file
+    exists AND has ≥1 checkbox AND every checkbox is checked.
+
+    `args.file` defaults to `.iteration/goal.md` (relative to cwd).
+    A missing or unreadable file returns False rather than raising —
+    predicate eval is a best-effort observation, not a contract."""
+    file_path = args.get("file") or ".iteration/goal.md"
+    path = pathlib.Path(file_path)
+    if not path.is_file():
+        return False
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    checked, total = _count_checkbox_completion(text)
+    if total == 0:
+        return False
+    return checked == total
+
+
+def evaluate_success_criterion(
+    routine_config: dict,
+    context: Optional[dict] = None,
+) -> Optional[bool]:
+    """Evaluate a routine's `success_criterion` against the current
+    repo state. Returns:
+
+    - `True`  — predicate satisfied; routine should transition
+      ACTIVE → COMPLETED (caller's responsibility to apply).
+    - `False` — predicate not yet satisfied; routine keeps firing.
+    - `None`  — no orchestrator-side decision possible: the criterion
+      is either absent, empty, or `llm-narrative` (deferred to the
+      meta-agent's LLM evolve step).
+
+    The function is pure with respect to `routine_config` and
+    `context`; the only side effect is a single read of the goal file
+    when `kind: all-tasks-checked` is evaluated. Unknown kinds raise
+    `ValueError` — sealed union, exhaustive match.
+
+    Issue #75 implements `all-tasks-checked` and `llm-narrative`.
+    Issue #76 adds `coverage-above`, `pr-merged-count`,
+    `no-failures-n-days`."""
+    if context is None:
+        context = {}
+    raw = routine_config.get("success_criterion")
+    sc = normalize_success_criterion(raw)
+    if sc is None:
+        return None
+    kind = sc["kind"]
+    args = sc["args"]
+    if kind == "llm-narrative":
+        # Auto-wrapped empty prose is semantically "no criterion".
+        if not (args.get("prose") or "").strip():
+            return None
+        return None
+    if kind == "all-tasks-checked":
+        return _eval_all_tasks_checked(args, context)
+    if kind in ("coverage-above", "pr-merged-count", "no-failures-n-days"):
+        # Declared in PREDICATE_KINDS so sanity-check accepts them and
+        # downstream configs can be authored against the schema, but
+        # the evaluator branches land in issue #76. Return None for
+        # now so the LLM evolve step still runs (no regression).
+        return None
+    raise ValueError(
+        f"unhandled predicate kind {kind!r} — orchestrator.PREDICATE_KINDS "
+        f"is {sorted(PREDICATE_KINDS)}; evaluator must match"
+    )
 
 
 # ---------------------------------------------------------------------------
