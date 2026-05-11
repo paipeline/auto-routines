@@ -63,7 +63,8 @@ Canonical shape:
   "outcome": "ok|noop|warn|err",
   "summary": "<one line — include PR url if you opened one>",
   "increment_signal": true,
-  "last_fire_sha": "<git rev-parse HEAD>"
+  "last_fire_sha": "<git rev-parse HEAD>",
+  "pr_url": "<optional — full https://github.com/.../pull/N URL when you opened or refreshed a PR; surfaced by `status.py --routine <id>`>"
 }
 ```
 
