@@ -182,7 +182,19 @@ broken installs, or routines that drift back to "analyze only."
       common drift forms (`date -u`, `%Z`, literal `Z` suffix), and
       require every hook log.jsonl write to carry the `outcome`
       field so downstream readers (status.py, dashboard, FSM
-      staleness detector) can branch deterministically.
+      staleness detector) can branch deterministically. **Preamble
+      FSM matches canonical sanity-check states** — `templates/
+      routine-preamble.md` enumerates the state set and the firing
+      rule independently of `scripts/sanity-check.py::ROUTINE_STATES`
+      and `FIRING_STATES`. Drift detectors in
+      `tests/test_preamble_fsm_matches_sanity.py` (5 invariants across
+      TestPreambleEnumeratesEveryCanonicalState,
+      TestPreambleFiringStatesMatchesSanity,
+      TestPreambleTransitionTableUsesCanonicalStates) bind the
+      preamble's state list, firing-states sentence, and transition
+      table to the canonical sets — adding/removing/renaming a state
+      now fails at test-time, not at runtime when a routine reads
+      its own state from config.yaml and doesn't know what to do.
 
 ### Catalog quality
 - [x] Add a `coverage-watcher` archetype: opens a PR when project test coverage
