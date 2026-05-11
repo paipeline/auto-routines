@@ -210,6 +210,178 @@ def _count_checkbox_completion(text: str) -> tuple[int, int]:
     return checked, total
 
 
+def _eval_coverage_above(args: dict, context: dict) -> bool:
+    """`coverage-above` — True iff `args.file` parses to a coverage
+    percentage ≥ `args.threshold`. Inclusive at the boundary (exactly
+    at threshold counts as passing — otherwise threshold=80 + actual=80%
+    never completes, which is a footgun).
+
+    Two source formats auto-detected by first non-whitespace byte:
+
+    - Cobertura XML (`<coverage line-rate="0.84" ...>`) — what
+      `pytest-cov --cov-report=xml` emits.
+    - `coverage report` stdout — bottom-line `TOTAL ... 84%`.
+
+    Default threshold is 80 (the conventional round number). Default
+    file is `coverage.xml`. Missing / unparseable file returns False
+    (predicate eval is observational, not assertive)."""
+    file_path = args.get("file") or "coverage.xml"
+    threshold = args.get("threshold")
+    if threshold is None:
+        threshold = 80
+    path = pathlib.Path(file_path)
+    if not path.is_file():
+        return False
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    pct = _parse_coverage_percent(text)
+    if pct is None:
+        return False
+    return pct >= float(threshold)
+
+
+def _parse_coverage_percent(text: str) -> Optional[float]:
+    """Return the overall coverage as a percent (0-100), or None if
+    the file isn't recognized as either Cobertura XML or
+    `coverage report` stdout. Pure: no I/O."""
+    stripped = text.lstrip()
+    if stripped.startswith("<"):
+        # Cobertura: <coverage line-rate="0.84" ...>
+        m = re.search(r'<coverage[^>]*\bline-rate\s*=\s*"([0-9.]+)"', text)
+        if not m:
+            return None
+        try:
+            rate = float(m.group(1))
+        except ValueError:
+            return None
+        # Cobertura's line-rate is a 0..1 ratio; promote to percent.
+        return rate * 100.0
+    # Plain-text `coverage report`: a bottom-line `TOTAL ... NN%` line.
+    # Match the last TOTAL row so a stray "TOTAL" elsewhere doesn't win.
+    last_total_pct: Optional[float] = None
+    for line in text.splitlines():
+        m = re.match(r"^\s*TOTAL\b.*?(\d+(?:\.\d+)?)\s*%\s*$", line)
+        if m:
+            try:
+                last_total_pct = float(m.group(1))
+            except ValueError:
+                pass
+    return last_total_pct
+
+
+def _load_log_entries(log_path: str) -> list[dict]:
+    """Read `.iteration/log.jsonl` and return parsed entries. Lines
+    that don't parse as JSON are skipped silently — a half-written
+    log line must not crash the predicate evaluator."""
+    import json
+    path = pathlib.Path(log_path)
+    if not path.is_file():
+        return []
+    entries: list[dict] = []
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(obj, dict):
+                    entries.append(obj)
+    except OSError:
+        return []
+    return entries
+
+
+def _eval_pr_merged_count(
+    args: dict, context: dict, routine_id: str
+) -> bool:
+    """`pr-merged-count` — True iff the count of log entries belonging
+    to this routine, with `outcome: ok` AND a `pr_url` field, meets or
+    exceeds `args.count`. Scoped by routine id — without scoping, every
+    routine in a multi-archetype install would "complete" the moment
+    the global PR count crossed the threshold."""
+    log_path = context.get("log_path") or ".iteration/log.jsonl"
+    target = int(args.get("count", 1))
+    count = 0
+    for entry in _load_log_entries(log_path):
+        if entry.get("routine") != routine_id:
+            continue
+        if entry.get("outcome") != "ok":
+            continue
+        if not entry.get("pr_url"):
+            continue
+        count += 1
+        if count >= target:
+            return True
+    return False
+
+
+def _parse_iso_local(ts: str) -> Optional[dt.datetime]:
+    """Parse an ISO 8601 string with offset (the canonical log.jsonl
+    `ts` format — see `templates/routine-preamble.md`). Returns a
+    tz-aware datetime or None on parse failure. Accepts both
+    `+HHMM` (date(1) default) and `+HH:MM` (strict ISO)."""
+    if not isinstance(ts, str) or not ts:
+        return None
+    candidate = ts
+    # `date +%Y-%m-%dT%H:%M:%S%z` emits `+HHMM` with no colon.
+    # `datetime.fromisoformat` on 3.11+ accepts both, but we
+    # normalize for 3.9/3.10 compatibility.
+    m = re.match(r"^(.+)([+-])(\d{2})(\d{2})$", candidate)
+    if m and ":" not in m.group(0)[-5:]:
+        candidate = f"{m.group(1)}{m.group(2)}{m.group(3)}:{m.group(4)}"
+    try:
+        out = dt.datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    if out.tzinfo is None:
+        return None
+    return out
+
+
+def _eval_no_failures_n_days(
+    args: dict, context: dict, routine_id: str
+) -> bool:
+    """`no-failures-n-days` — True iff:
+
+    - at least one entry for this routine falls inside the window
+      `(now - days, now]`, AND
+    - no entry in that window has `outcome: err`.
+
+    "At least one entry in window" prevents auto-completing a fresh
+    install: with no history at all, we don't know the routine is
+    stable, only that we haven't seen it fail (or fire). Same
+    reasoning as `all-tasks-checked` rejecting empty goal files."""
+    log_path = context.get("log_path") or ".iteration/log.jsonl"
+    days = int(args.get("days", 7))
+    now_str = context.get("now")
+    if now_str:
+        now = _parse_iso_local(now_str)
+        if now is None:
+            return False
+    else:
+        now = dt.datetime.now().astimezone()
+    cutoff = now - dt.timedelta(days=days)
+    saw_in_window = False
+    for entry in _load_log_entries(log_path):
+        if entry.get("routine") != routine_id:
+            continue
+        ts = _parse_iso_local(entry.get("ts", ""))
+        if ts is None:
+            continue
+        if ts <= cutoff:
+            continue
+        saw_in_window = True
+        if entry.get("outcome") == "err":
+            return False
+    return saw_in_window
+
+
 def _eval_all_tasks_checked(args: dict, context: dict) -> bool:
     """`all-tasks-checked` — True iff the referenced markdown file
     exists AND has ≥1 checkbox AND every checkbox is checked.
@@ -268,12 +440,14 @@ def evaluate_success_criterion(
         return None
     if kind == "all-tasks-checked":
         return _eval_all_tasks_checked(args, context)
-    if kind in ("coverage-above", "pr-merged-count", "no-failures-n-days"):
-        # Declared in PREDICATE_KINDS so sanity-check accepts them and
-        # downstream configs can be authored against the schema, but
-        # the evaluator branches land in issue #76. Return None for
-        # now so the LLM evolve step still runs (no regression).
-        return None
+    if kind == "coverage-above":
+        return _eval_coverage_above(args, context)
+    if kind == "pr-merged-count":
+        return _eval_pr_merged_count(args, context, routine_config.get("id", ""))
+    if kind == "no-failures-n-days":
+        return _eval_no_failures_n_days(
+            args, context, routine_config.get("id", "")
+        )
     raise ValueError(
         f"unhandled predicate kind {kind!r} — orchestrator.PREDICATE_KINDS "
         f"is {sorted(PREDICATE_KINDS)}; evaluator must match"

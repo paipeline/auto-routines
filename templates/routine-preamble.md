@@ -128,12 +128,19 @@ The orchestrator handles these kinds:
   checkbox is checked AND there is at least one. Empty files never
   complete (otherwise a fresh install would auto-shut-down every
   routine before the user wrote their goal).
-- `coverage-above` — `args.threshold` (percent, e.g. `80`) holding for
-  `args.window` consecutive fires. (Evaluator lands in issue #76.)
-- `pr-merged-count` — at least `args.count` PRs from this routine have
-  merged. (Evaluator lands in issue #76.)
-- `no-failures-n-days` — no `outcome: err` entries in this routine's
-  log for the last `args.days` days. (Evaluator lands in issue #76.)
+- `coverage-above` — reads `args.file` (default `coverage.xml`, format
+  auto-detected: Cobertura XML or `coverage report` stdout) and
+  compares the overall line-rate against `args.threshold` (percent,
+  default 80, inclusive at the boundary). Missing/unparseable file
+  returns false.
+- `pr-merged-count` — counts entries in `.iteration/log.jsonl`
+  belonging to this routine with `outcome: ok` AND a `pr_url` field.
+  COMPLETED when the count meets or exceeds `args.count`. Scoped by
+  routine id so other routines' PRs don't contribute.
+- `no-failures-n-days` — scans this routine's log entries in the
+  trailing `args.days` window. COMPLETED iff at least one entry falls
+  in the window AND none has `outcome: err`. The "at least one in
+  window" gate prevents auto-completing on an empty install.
 - `llm-narrative` — fallback for unstructured criteria. The
   meta-agent reads `args.prose` and decides. Backward compat: an
   older string-valued `success_criterion` is auto-wrapped into
