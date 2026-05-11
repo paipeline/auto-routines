@@ -70,6 +70,62 @@
 # add the id to the matching bucket above, and the at-a-glance test stays
 # green.
 
+# Harness presets — stack → canonical archetype set (issue #78).
+# Used by `auto-routines detect-harness [--apply]` to skip the
+# interview when the repo's stack is unambiguous. Without `--apply`
+# the subcommand prints the proposed set; with `--apply` it writes
+# `.iteration/config.yaml` non-interactively.
+#
+# Each preset declares:
+#   stack_hints: filesystem signals that indicate this stack
+#                (paths checked relative to the repo root)
+#   archetypes:  the archetype ids to install — must exist below in
+#                the `archetypes:` list. The drift-detector test
+#                `tests/test_harness_presets.py` pins this.
+#
+# Detection is precedence-ordered (first match wins). Order matters:
+# python-pytest before plain-python so a repo with both `pytest` and
+# `pyproject.toml` doesn't double-match.
+harness_presets:
+  - id: python-pytest
+    name: "Python (pytest)"
+    stack_hints:
+      - pytest.ini
+      - pyproject.toml
+      - tests/
+    archetypes:
+      - commit-tests
+      - commit-lint
+      - secret-scan
+      - coverage-watcher
+      - prd-implement
+      - meta-evolve
+
+  - id: node-jest
+    name: "Node.js (Jest)"
+    stack_hints:
+      - package.json
+      - jest.config.js
+      - jest.config.ts
+    archetypes:
+      - commit-tests
+      - commit-lint
+      - secret-scan
+      - prd-implement
+      - meta-evolve
+
+  - id: go
+    name: "Go"
+    stack_hints:
+      - go.mod
+      - go.sum
+    archetypes:
+      - commit-tests
+      - commit-lint
+      - secret-scan
+      - prd-implement
+      - meta-evolve
+
 archetypes:
 
   - id: prd-implement

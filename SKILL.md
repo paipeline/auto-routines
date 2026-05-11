@@ -156,6 +156,23 @@ user is never staring at a silent terminal for more than a few seconds.
 
 3. **Analyze** — detect stack (`package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `Gemfile`, …); detect tests/CI; read `git log --oneline -50`; `gh pr list --state all --limit 20` if available; read `README*`.
 
+> **Express path — skip the interview when the stack is unambiguous.**
+> If step 3 detected exactly one stack that matches a preset declared in
+> `templates/routine-catalog.yaml > harness_presets:` (python-pytest,
+> node-jest, go), you may offer the user the express install:
+>
+> ```bash
+> python3 scripts/orchestrator.py detect-harness \
+>     --repo . --catalog templates/routine-catalog.yaml --apply
+> ```
+>
+> This writes a minimal `.iteration/config.yaml` non-interactively
+> using the preset's canonical archetype set, then jumps directly to
+> step 6 ("Install"). The interview steps 4–5 are skipped. Always offer
+> the user a chance to opt out and run the full interview — the
+> express path is for the common case (one obvious harness, defaults
+> are fine), not the only path.
+
 ---
 
 ### Interview (steps 4–5)

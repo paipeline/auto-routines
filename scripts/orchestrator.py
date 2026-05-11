@@ -726,6 +726,46 @@ def tick(
 
 
 # ---------------------------------------------------------------------------
+# Harness detection — stack → canonical preset (issue #78).
+#
+# A pure function over a repo path + the catalog's `harness_presets` list.
+# Precedence: first match wins, so the catalog author controls priority
+# (python-pytest declared first wins on a polyglot repo). A "match" is:
+# at least one of the preset's `stack_hints` paths exists under the repo
+# root. Hints ending in `/` are treated as directory tests; everything
+# else as a regular path test (existing file OR directory). Keeping the
+# rule simple — sophisticated heuristics belong in the interview, not in
+# the express path.
+# ---------------------------------------------------------------------------
+
+
+def detect_harness(repo_path: str, presets: list) -> Any:
+    """Return the first preset whose `stack_hints` are satisfied by the
+    filesystem under `repo_path`, or None if no preset matches.
+
+    Pure: no globals, no cwd dependence. Tests pin precedence — first
+    match in catalog order wins."""
+    import os as _os  # local import — keep module-import path clean
+
+    if not presets:
+        return None
+    root = _os.fspath(repo_path)
+    for preset in presets:
+        hints = preset.get("stack_hints") or []
+        for hint in hints:
+            # A trailing slash means "this must be a directory". Otherwise
+            # any path entry (file or dir) counts as a match.
+            candidate = _os.path.join(root, hint.rstrip("/"))
+            if hint.endswith("/"):
+                if _os.path.isdir(candidate):
+                    return preset
+            else:
+                if _os.path.exists(candidate):
+                    return preset
+    return None
+
+
+# ---------------------------------------------------------------------------
 # CLI shim — what the GHA workflow (and ad-hoc local debug) calls.
 #
 # The pure functions above are what we test heavily. This block is the
@@ -1252,6 +1292,41 @@ def _make_parser() -> argparse.ArgumentParser:
             "Path to the repo root to audit. Required — never default "
             "to cwd (auditing the wrong repo by accident is worse "
             "than a noisy argparse error)."
+        ),
+    )
+
+    # detect-harness (issue #78) — stack-aware express install path.
+    # Without --apply, prints the detected preset + archetype set so the
+    # user (or a wrapper script) can decide. With --apply, writes a
+    # minimal `.iteration/config.yaml` non-interactively. The catalog's
+    # `harness_presets:` table is the single source of truth — see
+    # `tests/test_harness_presets.py` for the drift-detector.
+    dh_p = sub.add_parser(
+        "detect-harness",
+        help="Detect the repo's harness stack and (optionally) install canonical routines.",
+        description=(
+            "Identify the repo's test/build harness from filesystem "
+            "hints declared by `harness_presets:` in the catalog, then "
+            "either print the proposed routine set (default) or write "
+            "`.iteration/config.yaml` non-interactively (with --apply). "
+            "This is the express path that lets a user skip the 20-min "
+            "interview when their stack is unambiguous."
+        ),
+    )
+    dh_p.add_argument(
+        "--repo", required=True,
+        help="Repo root to inspect for stack hints.",
+    )
+    dh_p.add_argument(
+        "--catalog", required=True,
+        help="Path to templates/routine-catalog.yaml (source of truth).",
+    )
+    dh_p.add_argument(
+        "--apply", action="store_true",
+        help=(
+            "Write `.iteration/config.yaml` under --repo with the "
+            "preset's canonical archetype set. Without this flag, the "
+            "subcommand only prints what it would install."
         ),
     )
     return p
@@ -2777,6 +2852,196 @@ def _cli_install_doctor(args, out, err) -> int:
     return 1 if failures else 0
 
 
+# ---------------------------------------------------------------------------
+# detect-harness CLI (issue #78) — express install path.
+# ---------------------------------------------------------------------------
+
+
+# Minimal human-trigger → cron lookup for the express install. Only
+# covers the phrases that ship in `templates/routine-catalog.yaml`. If a
+# new archetype lands with an unfamiliar phrase, the CLI falls back to a
+# safe daily-9am cron rather than guessing wrong — and a test in
+# `tests/test_harness_presets.py` keeps the preset archetype set pinned
+# to the catalog so this dict stays small.
+_TRIGGER_HUMAN_TO_CRON: dict[str, str] = {
+    "every 4 hours": "0 */4 * * *",
+    "every 6 hours": "0 */6 * * *",
+    "every 12 hours": "0 */12 * * *",
+    "every 30 minutes": "*/30 * * * *",
+    "every 15 minutes": "*/15 * * * *",
+    "6:00 PM daily": "0 18 * * *",
+    "9:00 AM Mondays": "0 9 * * 1",
+    "9:00 AM daily": "0 9 * * *",
+    "5:00 PM Mondays": "0 17 * * 1",
+    "5:00 PM weekdays": "0 17 * * 1-5",
+}
+_TRIGGER_DEFAULT_FALLBACK_CRON = "0 9 * * *"  # safe daily 9 AM
+
+
+def _routine_from_archetype(archetype: dict) -> dict:
+    """Build a config.yaml `routines[]` entry from a catalog archetype.
+
+    Schema 4 minimal — every field sanity-check requires is filled in.
+    The values come straight from the archetype's defaults; the user
+    can edit afterwards. Pure: no I/O."""
+    primitive = archetype.get("primitive", "scheduled")
+    trigger_human = archetype.get("trigger_default", "") or ""
+    trigger: dict = {"human": trigger_human}
+    if primitive in {"scheduled", "pr-poll"}:
+        cron = _TRIGGER_HUMAN_TO_CRON.get(
+            trigger_human, _TRIGGER_DEFAULT_FALLBACK_CRON,
+        )
+        trigger["cron"] = cron
+    entry: dict = {
+        "id": archetype.get("id"),
+        "state": "PROPOSED",
+        "enabled": True,
+        "primitive": primitive,
+        "est_minutes": 5,
+        "trigger": trigger,
+        "purpose": archetype.get("purpose", ""),
+        "success_criterion": archetype.get("success_criterion", ""),
+        "stagnation_threshold": 5,
+        "self_evolve": bool(archetype.get("self_evolve", False)),
+        "automation_level": archetype.get("automation_default", "auto"),
+        "prompt_skill": archetype.get("id"),
+        "iter_added": 1,
+        "task_id": "",
+        "last_outcome_summary": "",
+        "stats": {
+            "runs": 0, "useful": 0, "noisy": 0, "last_useful_iter": None,
+        },
+    }
+    if primitive in {"scheduled", "pr-poll"}:
+        entry["execution_surface"] = "local"
+    return entry
+
+
+def _build_express_config(repo_path: str, preset: dict, catalog: dict) -> dict:
+    """Construct a minimal schema-4 config dict for `--apply` mode.
+
+    `repo_slug` is derived from the basename of the repo path so we
+    don't depend on git remotes or cwd. The user can edit afterwards."""
+    import os as _os
+    slug = _os.path.basename(_os.path.abspath(repo_path)) or "repo"
+    # Kebab-coerce: lowercase, replace anything non-[a-z0-9-] with '-',
+    # collapse runs. Sanity-check requires `^[a-z][a-z0-9]*(-[a-z0-9]+)*$`.
+    slug = re.sub(r"[^a-z0-9]+", "-", slug.lower()).strip("-") or "repo"
+    if not slug[0].isalpha():
+        slug = "repo-" + slug
+    slug = slug[:32]
+
+    archetype_by_id = {a.get("id"): a for a in (catalog.get("archetypes") or [])}
+    routines: list[dict] = []
+    for arch_id in preset.get("archetypes", []):
+        arch = archetype_by_id.get(arch_id)
+        if arch is None:
+            # Drift detector should have prevented this — but if a preset
+            # somehow references a phantom id, skip rather than crash.
+            continue
+        routines.append(_routine_from_archetype(arch))
+
+    return {
+        "schema_version": 4,
+        "repo_slug": slug,
+        "goal": f"Auto-installed via detect-harness ({preset.get('id')}).",
+        "mode": "goal-driven",
+        "created_at": _local_iso_with_offset(
+            dt.datetime.now().astimezone()
+        ),
+        "last_iter": 1,
+        "deps": {"gh": "required", "mcps": ["scheduled-tasks"]},
+        "routines": routines,
+        "meta": {
+            "cron": "0 9 * * *",
+            "human": "9:00 AM daily",
+            "anti_flap_window": 7,
+            "default_stagnation_threshold": 5,
+            "process_evolve_requests": True,
+            "budget": "medium",
+            "idle_window": "always",
+            "gha_minutes_cap": 1500,
+            "kill_switch": False,
+        },
+    }
+
+
+def _cli_detect_harness(args, out, err) -> int:
+    """Detect the repo's harness stack and (optionally) install routines.
+
+    Without `--apply`: print the matched preset id + the archetype set
+    that *would* be installed. Exit 1 if no preset matches so a shell
+    wrapper can branch on the failure cleanly.
+
+    With `--apply`: write `.iteration/config.yaml` populated from the
+    preset's archetype set (each archetype mapped to a routine entry
+    via `_routine_from_archetype`). Atomic via `_atomic_write_yaml`."""
+    try:
+        catalog = _load_yaml(args.catalog)
+    except (OSError, Exception) as e:
+        print(f"catalog load failed: {e}", file=err)
+        return 1
+
+    presets = (catalog or {}).get("harness_presets") or []
+    if not presets:
+        print(
+            "catalog has no `harness_presets:` block — "
+            "nothing to detect.",
+            file=err,
+        )
+        return 1
+
+    preset = detect_harness(args.repo, presets)
+    if preset is None:
+        # Non-zero so a shell wrapper sees the failure. Message goes to
+        # stderr so stdout stays parseable on success.
+        print(
+            f"no preset matched repo at {args.repo!r}. "
+            f"Stacks checked: "
+            f"{', '.join(p.get('id', '?') for p in presets)}. "
+            "Run the full interview (`/auto-routines init`) instead.",
+            file=err,
+        )
+        return 1
+
+    # Always print the detected preset + archetype set, with or without
+    # --apply. With --apply the same lines act as a confirmation that
+    # this is what landed in config.yaml.
+    print(f"stack: {preset.get('id')}", file=out)
+    name = preset.get("name")
+    if name:
+        print(f"name: {name}", file=out)
+    print("archetypes:", file=out)
+    for arch_id in preset.get("archetypes", []):
+        print(f"  - {arch_id}", file=out)
+
+    if not args.apply:
+        print(
+            "\nDry run — pass `--apply` to write "
+            ".iteration/config.yaml non-interactively.",
+            file=out,
+        )
+        return 0
+
+    config_dir = pathlib.Path(args.repo) / ".iteration"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "config.yaml"
+    try:
+        config = _build_express_config(args.repo, preset, catalog)
+        _atomic_write_yaml(str(config_path), config)
+    except OSError as e:
+        print(f"config write failed: {e}", file=err)
+        return 1
+
+    print(
+        f"\nWrote {config_path} with "
+        f"{len(config.get('routines', []))} routines. "
+        "Edit before firing if you want to tune cadences.",
+        file=out,
+    )
+    return 0
+
+
 def _cli_test_fire(args, out, err) -> int:
     """Manual one-shot dispatch plan for `/auto-routines test-fire <id>`.
 
@@ -2895,6 +3160,9 @@ def cli_main(
 
     if args.command == "install-doctor":
         return _cli_install_doctor(args, out, err)
+
+    if args.command == "detect-harness":
+        return _cli_detect_harness(args, out, err)
 
     if args.command != "tick":
         print(f"unknown command: {args.command}", file=err)
