@@ -160,7 +160,7 @@ def test_catalog_header_documents_category_field(catalog):
 # They still must log and use increment_signal.
 COMMENT_ONLY_ARCHETYPES = {
     "pr-ci-watcher", "secret-scan", "pr-review-bot", "llm-ci-verifier",
-    "db-security-watcher",
+    "db-security-watcher", "compliance-watcher",
 }
 
 
