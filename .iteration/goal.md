@@ -134,9 +134,18 @@ broken installs, or routines that drift back to "analyze only."
       call shape is testable via monkeypatch — no real `gh` invocation,
       no real PR. Pinned by `tests/test_open_pr.py` (8 invariants across
       TestOpenPrCallShape, TestOpenPrErrors, TestNoUnmockedSubprocess).
-      Routines can now opt into the wrapper for deterministic PR opening;
-      catalog adoption is a separate slice (no archetype rewrites in this
-      iteration).
+      Routines can now opt into the wrapper for deterministic PR opening.
+      **Catalog adoption shipped** — all 4 archetypes that previously
+      hand-assembled `gh pr create` (prd-implement, commit-tests,
+      commit-lint, meta-evolve) now invoke `python3 scripts/orchestrator.py
+      open-pr --head <branch> --title <...> --body <...>` instead. The
+      wrapper auto-resolves `--base` from origin's default branch, so the
+      catalog no longer hand-codes `--base <default branch>`. Pinned by
+      `tests/test_catalog_adopts_open_pr.py` (21 invariants across
+      TestArchetypePromptBodyInvokesOpenPr, TestArchetypeOpenPrRequiredFlags,
+      TestNoArchetypeAssemblesGhPrCreateByHand, TestOpenPrInvokedViaOrchestrator
+      — per-archetype + global regression guard against any re-emergence
+      of `gh pr create` in prompt_body).
 
 ### Catalog quality
 - [x] Add a `coverage-watcher` archetype: opens a PR when project test coverage

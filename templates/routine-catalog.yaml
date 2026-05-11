@@ -129,9 +129,11 @@ archetypes:
          - Commit with conventional message
            (`feat:` / `fix:` / `refactor:` — one commit per logical change).
          - Push: `git push -u origin routines/prd-implement --force-with-lease`.
-         - Open PR via `gh pr create` referencing the PRD section by line
-           number. Body: what was built, why this slice next, test
-           results, screenshots if UI.
+         - Open PR via `python3 scripts/orchestrator.py open-pr
+           --head routines/prd-implement --title '<conventional-commit
+           summary>' --body '<what was built, why this slice next, PRD
+           section by line number, test results, screenshots if UI>'`.
+           The wrapper auto-resolves `--base` from origin's default branch.
       7. Update `.iteration/tasks.md`:
          - Mark the slice you implemented as `[x] done — <PR url>`.
          - Commit the tasks update on the same branch (separate commit).
@@ -207,10 +209,11 @@ archetypes:
          e. Create branch `routines/commit-tests`, commit with message
             `test: cover diff from <short SHA>` listing which functions
             were newly tested.
-         f. Open a PR via `gh pr create --base <default branch>
+         f. Open a PR via `python3 scripts/orchestrator.py open-pr
             --head routines/commit-tests --title 'test: cover diff from
             <short SHA>' --body '<list of newly-tested functions, coverage
-            delta, link to triggering commit>'`.
+            delta, link to triggering commit>'`. The wrapper auto-resolves
+            `--base` from origin's default branch.
          g. Log `outcome: ok, increment_signal: true, summary: <PR url>`.
          h. Hard cap: 15 minutes for the gap-fill phase. If you hit the
             cap with partial coverage, commit what you have with a TODO
@@ -224,9 +227,11 @@ archetypes:
             (or framework equivalent) only when you can show 3-of-5 runs pass.
          c. Create branch `routines/commit-tests`, commit your fix with message
             `fix(tests): <one-line summary>` referencing the original commit SHA.
-         d. Open a PR with `gh pr create --base <default branch> --head routines/commit-tests
-            --title 'fix(tests): <summary>' --body '<failing test output, root cause,
-            link to triggering commit>'`.
+         d. Open a PR with `python3 scripts/orchestrator.py open-pr
+            --head routines/commit-tests --title 'fix(tests): <summary>'
+            --body '<failing test output, root cause, link to triggering
+            commit>'`. The wrapper auto-resolves `--base` from origin's
+            default branch.
          e. Log `outcome: ok, increment_signal: true, summary: <PR url>`.
       5. Never push to main. Never amend the user's commit.
 
@@ -250,8 +255,11 @@ archetypes:
             apply it; only flag.
          b. Branch: `routines/commit-lint`. Commit with message
             `style: auto-fix lint violations from <short SHA>`.
-         c. Open PR via `gh pr create`. Body lists which tools fired and which
-            files changed.
+         c. Open PR via `python3 scripts/orchestrator.py open-pr
+            --head routines/commit-lint --title 'style: auto-fix lint
+            violations from <short SHA>' --body '<which tools fired, which
+            files changed>'`. The wrapper auto-resolves `--base` from
+            origin's default branch.
          d. Log `outcome: ok, increment_signal: true, summary: <PR url>`.
       3. Run remaining linters in check-only mode for issues that can't be
          auto-fixed. If any errors remain, open a separate PR with TODO comments
@@ -471,8 +479,11 @@ archetypes:
          - Branch: `git checkout -B routines/meta-evolve`.
          - Commit with message
            `chore(plan): re-plan tasks after goal.md change at <short SHA>`.
-         - Push and open a PR via `gh pr create`. Body: "what changed in
-           goal.md", "tasks added", "tasks removed", "tasks reworded".
+         - Push and open a PR via `python3 scripts/orchestrator.py open-pr
+           --head routines/meta-evolve --title 'chore(plan): re-plan tasks
+           after goal.md change at <short SHA>' --body '<what changed in
+           goal.md, tasks added, tasks removed, tasks reworded>'`. The
+           wrapper auto-resolves `--base` from origin's default branch.
          - Hard cap: 10 minutes. If you can't make sense of the new
            goal, commit a minimal rewrite with TODO markers and a
            `WIP:` prefix; the next prd-implement fire will refine.
