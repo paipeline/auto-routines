@@ -1,8 +1,14 @@
 {
-  "schema_version": 1,
+  "gha_minutes_reset_date": "2026-05-11",
   "gha_minutes_used_today": 0,
-  "gha_minutes_reset_date": "2026-05-10",
-  "last_event_id": 0,
   "kill_switch_active": false,
-  "last_dispatch": {}
+  "last_dispatch": {
+    "meta-evolve": {
+      "outcome": "ok",
+      "surface": "local",
+      "ts": "2026-05-11T04:11:32+0000"
+    }
+  },
+  "last_event_id": 2,
+  "schema_version": 1
 }
