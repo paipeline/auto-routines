@@ -63,6 +63,7 @@
 #   - secret-scan            block PR merge on leaked credentials
 #   - db-security-watcher    flag risky migrations / SQL patterns on commit
 #   - release-tag-checker    cut/check release tags after a merge
+#   - compliance-watcher     enforce license headers / file-size cap / PII patterns
 #
 # forward-driving (progress lane — proactively advances the project):
 #   - prd-implement          implement the next PRD slice
@@ -1052,3 +1053,120 @@ archetypes:
             v.   Log `increment_signal: true`.
          c. If version was bumped, log `outcome: ok, increment_signal: false`.
       3. For non-release commits, exit immediately.
+
+  - id: compliance-watcher
+    purpose: "On every commit, scan the diff for license-header / file-size / PII-pattern violations and post a PR-review checklist of findings."
+    primitive: git-hook
+    category: reactive
+    trigger_default: "on every git commit (post-commit)"
+    automation_default: notify
+    self_evolve: false
+    success_criterion:
+      kind: no-failures-n-days
+      args:
+        days: 30
+    # Compliance applies broadly — no stack signal narrows it. Leave
+    # `stack_hints` empty so the interview does not auto-propose
+    # compliance-watcher on every detected stack; users opt in
+    # deliberately when their project has a license-header policy,
+    # file-size cap, or PII-pattern concern.
+    stack_hints: []
+    routine_specific_inputs:
+      license_template: "path to a file containing the required license header (e.g. .compliance/license-header.txt)"
+      max_file_size_kb: "integer (default 500) — any committed file larger than this is flagged as a likely binary blob"
+      sensitive_patterns: "list of regex strings to match in the diff in addition to the built-in SSN / credit-card / JWT / AWS-key shapes"
+      gdpr_hipaa_keywords: "optional list of GDPR/HIPAA-relevant keywords to flag for review (e.g. 'patient', 'diagnosis', 'national id')"
+    prompt_body: |
+      You are the **compliance watcher**. The user just committed.
+      Your job: scan the *diff* of HEAD for compliance violations
+      against the configured rule catalog and post a PR review
+      checklist of findings. You DO NOT auto-rewrite files. You
+      DO NOT branch + commit. Findings are advisory — humans decide.
+
+      0. Read your config from `.routines/<routine_id>/config.yaml`
+         under `routine_specific_inputs`:
+         - `license_template` — path to the required header text.
+         - `max_file_size_kb` — int, default 500.
+         - `sensitive_patterns` — extra regex list, default `[]`.
+         - `gdpr_hipaa_keywords` — extra keyword list, default `[]`.
+         If config is missing entirely, fall back to the built-in
+         defaults below.
+
+      1. Compute the diff: `git diff HEAD~1 HEAD --name-status` for
+         changed files, `git diff HEAD~1 HEAD -- <file>` for each
+         file's added lines. **Never scan full files** — pre-
+         existing violations would be re-flagged on every commit.
+
+      2. For each ADDED or MODIFIED source file in the diff, check:
+
+         a. **License header**: if `license_template` is configured
+            AND the file is a "source file" (extension in
+            .py / .ts / .tsx / .js / .jsx / .go / .rs / .java
+            / .c / .cpp / .h / .swift / .kt — extensible via
+            config), the first ~10 lines of the file must contain
+            the template's first non-blank line. If missing,
+            record one finding.
+
+         b. **File-size cap**: `git cat-file -s HEAD:<file>` in
+            bytes; if `> max_file_size_kb * 1024`, record one
+            finding ("likely binary blob — was this intended?").
+
+         c. **Sensitive-data patterns** in the ADDED lines:
+            - SSN-shaped: `\b\d{3}-\d{2}-\d{4}\b`
+              (social security number format).
+            - Credit-card-shaped: `\b(?:\d[ -]*?){13,19}\b`
+              filtered through a Luhn check to reduce false
+              positives (a 16-digit GUID will fail Luhn).
+            - JWT-shaped: `\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`
+              (three base64 segments separated by dots).
+            - AWS access key: `\bAKIA[0-9A-Z]{16}\b`.
+            - Any additional regex in `sensitive_patterns` from
+              config.
+            For each match, record a finding with the file, the
+            line number, and which pattern matched. **Do not echo
+            the matched value into the log** — log the pattern
+            name and location only.
+
+         d. **GDPR/HIPAA keywords** (if configured): scan the
+            added lines for each keyword; record a finding per
+            hit so a human can confirm intent.
+
+      3. Output:
+
+         a. Always append a structured entry to
+            `.iteration/log.jsonl`:
+            ```json
+            {
+              "ts": "<UTC ISO8601>",
+              "routine": "compliance-watcher",
+              "outcome": "ok" | "findings",
+              "increment_signal": false,
+              "findings": [
+                {"rule": "license-header", "file": "...", "line": 1},
+                {"rule": "file-size-cap", "file": "...", "bytes": 1234567},
+                {"rule": "sensitive-pattern",
+                 "pattern": "ssn|credit-card|jwt|aws-key|<custom>",
+                 "file": "...", "line": 42},
+                {"rule": "gdpr-hipaa-keyword",
+                 "keyword": "patient", "file": "...", "line": 17}
+              ]
+            }
+            ```
+            `increment_signal` is **always false** — compliance is
+            quality maintenance, not forward progress.
+
+         b. If there are findings AND a PR is open for the current
+            branch, post a PR `review` (not a top-level comment) at
+            COMMENT level with a markdown checklist — one `- [ ]`
+            item per finding, grouped by rule. Use:
+            `gh pr review <pr_number> --comment --body '<body>'`.
+            Do not request changes; let humans decide.
+
+         c. If no PR is open, the log entry is the only output;
+            the next routine that opens a PR can surface findings
+            via the daily-digest.
+
+      4. **Never branch and never commit.** automation_default is
+         `notify`; findings are advisory only. The skill's global
+         exemption list (COMMENT_ONLY_ARCHETYPES) recognises this
+         archetype as comment-only.
