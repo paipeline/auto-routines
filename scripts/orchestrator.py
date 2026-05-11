@@ -920,6 +920,34 @@ def _make_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # recompute-cadence: value-based throttle/amplify within the
+    # current budget tier. Reads each routine's recent log entries,
+    # computes useful_fires/total_fires, picks the corresponding rung
+    # on `CADENCE_LADDERS[tier]`, writes back. Bounded by tier — never
+    # crosses `budget` command's cap.
+    recompute_p = sub.add_parser(
+        "recompute-cadence",
+        help="Retune cron per routine based on recent value signal (within budget tier).",
+        description=(
+            "Reads `.iteration/log.jsonl` and recomputes each routine's "
+            "cron position on its budget tier's cadence ladder. "
+            "value_rate = useful_fires / total_fires where useful means "
+            "`outcome: ok` AND `increment_signal: true`. Idempotent: if "
+            "the recomputed cron equals the current cron, no write."
+        ),
+    )
+    recompute_p.add_argument(
+        "--config", required=True, help="Path to .iteration/config.yaml"
+    )
+    recompute_p.add_argument(
+        "--log", default=".iteration/log.jsonl",
+        help="Path to log.jsonl (default: .iteration/log.jsonl)",
+    )
+    recompute_p.add_argument(
+        "--window", default=20, type=int,
+        help="How many recent entries per routine to consider (default: 20)",
+    )
+
     # test-fire: manual one-shot dispatch plan for a single routine.
     # Read-only — does not touch state.json. Used by `/auto-routines
     # test-fire <id>` for debugging without waiting for cron.
@@ -1257,6 +1285,42 @@ BUDGET_PRESETS: dict[str, dict[str, tuple[str, str]]] = {
     },
 }
 
+# Per-tier cadence ladders for value-based recompute (issue #77).
+# Ordered slowest → fastest. The recompute function picks an index
+# into this list based on `value_rate`:
+#
+#   value_rate = useful_fires / total_fires
+#              where useful = (outcome == 'ok' AND increment_signal == true)
+#
+#   index = round(value_rate * (len(ladder) - 1))
+#
+# So vr=0.0 → ladder[0] (slow end), vr=1.0 → ladder[-1] (fast end),
+# vr=0.5 → middle rung. The ladders are scoped within each budget
+# tier — a high-value routine on `low` budget never escapes `low`'s
+# fastest rung. To go faster the user bumps tier via the `budget`
+# command.
+#
+# `custom` is intentionally absent: recompute respects user-tuned
+# crons and never touches a `custom`-tier install.
+CADENCE_LADDERS: dict[str, list[tuple[str, str]]] = {
+    "low": [
+        ("0 9 * * 1", "Mondays 9:00 AM"),
+        ("0 9 * * 1,4", "Mondays + Thursdays 9:00 AM"),
+        ("0 9 * * 1-5", "weekdays 9:00 AM"),
+    ],
+    "medium": [
+        ("0 9 * * *", "9:00 AM daily"),
+        ("0 */12 * * *", "every 12 hours"),
+        ("0 */6 * * *", "every 6 hours"),
+    ],
+    "high": [
+        ("0 */6 * * *", "every 6 hours"),
+        ("0 */4 * * *", "every 4 hours"),
+        ("0 */2 * * *", "every 2 hours"),
+        ("*/30 * * * *", "every 30 minutes"),
+    ],
+}
+
 # meta.cron preset (the meta-evolve daily/weekly cron, not a routine).
 META_CRON_PRESETS: dict[str, tuple[str, str]] = {
     "low": ("0 9 * * 1", "Mondays 9:00 AM"),
@@ -1379,6 +1443,175 @@ def _atomic_write_yaml(path: str, data: dict) -> None:
     text = yaml.safe_dump(data, sort_keys=False)
     tmp.write_text(text)
     os.replace(tmp, p)
+
+
+# ---------------------------------------------------------------------------
+# Value-based cadence recompute (issue #77)
+# ---------------------------------------------------------------------------
+
+
+def _load_log_entries(log_path: str) -> list[dict]:
+    """Read `.iteration/log.jsonl` and return parsed entries. Lines
+    that don't parse as JSON are skipped silently — a half-written
+    log line must not crash the caller. Missing file returns []."""
+    p = pathlib.Path(log_path)
+    if not p.is_file():
+        return []
+    entries: list[dict] = []
+    try:
+        with p.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(obj, dict):
+                    entries.append(obj)
+    except OSError:
+        return []
+    return entries
+
+
+def _value_rate(entries: list[dict]) -> Optional[float]:
+    """Return the fraction of entries that count as 'useful' —
+    `outcome: ok` AND `increment_signal: true`. None if the input is
+    empty (no evidence to throttle on)."""
+    if not entries:
+        return None
+    useful = 0
+    for e in entries:
+        if e.get("outcome") == "ok" and bool(e.get("increment_signal")):
+            useful += 1
+    return useful / len(entries)
+
+
+def recompute_cadence(
+    routines: list[dict],
+    log_entries: list[dict],
+    budget_tier: str,
+    *,
+    window: int = 20,
+) -> dict[str, tuple[str, str]]:
+    """Compute new cron values for routines based on value-rate.
+
+    Inputs:
+      - `routines`: the `routines:` list from config.yaml. Each entry
+        must have `id` and `trigger`. Routines without `trigger.cron`
+        (hook/git-hook primitives) are silently skipped.
+      - `log_entries`: parsed `.iteration/log.jsonl` entries. The
+        function filters and windows internally.
+      - `budget_tier`: one of `{'low', 'medium', 'high', 'custom'}`.
+        `custom` returns `{}` (no recompute on user-tuned configs).
+      - `window`: how many recent entries per routine to consider.
+        Default 20 — old data shouldn't dampen a routine that's
+        since recovered.
+
+    Returns `{routine_id: (cron, human)}` only for routines whose
+    cadence should CHANGE (i.e. recomputed cron != current cron).
+    Empty dict means "nothing to do" — the caller can skip the write.
+
+    Raises `ValueError` for an unknown budget tier.
+
+    Pure: no I/O, no `datetime.now()`. The orchestrator's CLI wrapper
+    handles file reads / writes."""
+    if budget_tier == "custom":
+        return {}
+    if budget_tier not in CADENCE_LADDERS:
+        raise ValueError(
+            f"unknown budget tier {budget_tier!r} — recompute_cadence "
+            f"knows {sorted(CADENCE_LADDERS)} (plus 'custom' which is a "
+            "no-op)"
+        )
+    ladder = CADENCE_LADDERS[budget_tier]
+    changes: dict[str, tuple[str, str]] = {}
+    for routine in routines:
+        rid = routine.get("id")
+        if not rid:
+            continue
+        trigger = routine.get("trigger") or {}
+        current_cron = trigger.get("cron")
+        if not current_cron:
+            # hook / git-hook / loop primitives — no cron to recompute.
+            continue
+        # Filter log entries for this routine. Window from the END
+        # (most recent) — log.jsonl is append-only and chronologically
+        # ordered, so the last N are "recent".
+        entries = [e for e in log_entries if e.get("routine") == rid][-window:]
+        vr = _value_rate(entries)
+        if vr is None:
+            continue
+        idx = int(round(vr * (len(ladder) - 1)))
+        idx = max(0, min(len(ladder) - 1, idx))
+        new_cron, new_human = ladder[idx]
+        if new_cron == current_cron and new_human == (trigger.get("human") or new_human):
+            # Already at the right rung — idempotent skip.
+            continue
+        changes[rid] = (new_cron, new_human)
+    return changes
+
+
+def _cli_recompute_cadence(args, out, err) -> int:
+    """`auto-routines recompute-cadence` — read log + config, compute
+    new crons via `recompute_cadence`, write back atomically. Honors
+    the routine's budget tier from meta.budget. Reports one summary
+    line per touched routine. No-op exits 0 with no writes."""
+    try:
+        cfg = _load_yaml(args.config)
+    except (OSError, Exception) as e:
+        print(f"config load failed: {e}", file=err)
+        return 1
+    if cfg is None:
+        print(f"config is empty: {args.config}", file=err)
+        return 1
+    meta = (cfg or {}).get("meta", {}) or {}
+    budget_tier = meta.get("budget") or "custom"
+    routines = cfg.get("routines", []) or []
+
+    # Load the log; absent file = empty list (no evidence yet).
+    log_path = args.log or ".iteration/log.jsonl"
+    entries = _load_log_entries(log_path)
+
+    try:
+        changes = recompute_cadence(
+            routines, entries, budget_tier, window=int(args.window)
+        )
+    except ValueError as e:
+        print(f"recompute failed: {e}", file=err)
+        return 1
+
+    if not changes:
+        out.write(
+            f"# recompute-cadence — no changes "
+            f"(budget={budget_tier!r}, log entries={len(entries)})\n"
+        )
+        return 0
+
+    # Apply changes.
+    for routine in routines:
+        rid = routine.get("id")
+        if rid not in changes:
+            continue
+        cron, human = changes[rid]
+        trigger = routine.setdefault("trigger", {})
+        trigger["cron"] = cron
+        trigger["human"] = human
+
+    try:
+        _atomic_write_yaml(args.config, cfg)
+    except OSError as e:
+        print(f"config write failed: {e}", file=err)
+        return 1
+
+    out.write(
+        f"# recompute-cadence — {len(changes)} routine(s) retuned "
+        f"(budget={budget_tier!r})\n"
+    )
+    for rid, (cron, human) in changes.items():
+        out.write(f"  {rid}: cron={cron!r} ({human})\n")
+    return 0
 
 
 def _cli_first_pr_eta(args, out, err) -> int:
@@ -2632,6 +2865,9 @@ def cli_main(
 
     if args.command == "budget":
         return _cli_budget(args, out, err)
+
+    if args.command == "recompute-cadence":
+        return _cli_recompute_cadence(args, out, err)
 
     if args.command == "first-pr-eta":
         return _cli_first_pr_eta(args, out, err)
