@@ -208,6 +208,31 @@ broken installs, or routines that drift back to "analyze only."
       adds a field, preamble doesn't document it, LLM writers don't
       produce it) and unreachable-branch drift (reader checks for an
       outcome value the preamble doesn't list, so it can never fire).
+      **automation_level enum pinned to canonical** — the third
+      independent vocabulary the LLM routine writer reads (after
+      FSM states and log.jsonl shape) is the `automation_level`
+      enum (`off|notify|suggest|auto`). The preamble documents each
+      level's required behavior in prose; `templates/config.yaml`
+      carries an inline `# off | notify | suggest | auto` comment
+      next to every default; `scripts/sanity-check.py::LEVELS`
+      enforces. Three independent surfaces, no binding before this
+      tick. Drift detectors in
+      `tests/test_automation_level_pinned_to_canonical.py` (8
+      invariants across TestPreambleAutomationLevelsAreCanonical,
+      TestPreambleCoversEveryCanonicalLevel,
+      TestConfigYamlCommentMatchesCanonicalEnum) bind: every
+      `automation_level: <value>` reference in the preamble is in
+      `sanity.LEVELS` (no-phantom); every value in `sanity.LEVELS`
+      is documented in the preamble (parametrized; coverage); the
+      config.yaml inline comment exactly matches `sanity.LEVELS`
+      (no missing, no phantom); every shipped default
+      `automation_level:` value in the template is in
+      `sanity.LEVELS`. Same drift pattern as
+      `test_preamble_fsm_matches_sanity.py` extended to the third
+      vocabulary — adding/removing/renaming a level now fails at
+      test-time, not at install-time when the user's config.yaml
+      hits sanity-check or runtime when an LLM writer sees a level
+      it has no documented behavior for.
 
 ### Catalog quality
 - [x] Add a `coverage-watcher` archetype: opens a PR when project test coverage
