@@ -20,6 +20,8 @@ routines:
     primitive: scheduled
     execution_surface: local  # PRD #10 Module 5; default preserves v3 (local fire)
     est_minutes: 5             # for meta.gha_minutes_cap accounting once on gha
+    # Large prompt_body (3.3KB); cap at 6500 = 6KB ceiling + headroom for edits.
+    max_skill_bytes: 6500
     trigger:
       cron: "0 */12 * * *"
       human: "every 12 hours"
@@ -43,6 +45,8 @@ routines:
     enabled: true
     primitive: git-hook
     est_minutes: 5  # est cost when surfaced as gha; git-hook itself runs locally
+    # Large prompt_body (4.4KB); cap at 6500 to match prd-implement.
+    max_skill_bytes: 6500
     trigger:
       human: "on every git commit"
     purpose: "Run pytest after every commit; if it fails, open a fix PR."
@@ -88,6 +92,8 @@ routines:
     primitive: scheduled
     execution_surface: local
     est_minutes: 5
+    # Inputs block + prompt_body pushes just over the default cap.
+    max_skill_bytes: 4000
     trigger:
       cron: "0 17 * * 1"
       human: "5:00 PM Mondays"
@@ -111,6 +117,8 @@ routines:
     enabled: true
     primitive: git-hook
     est_minutes: 5
+    # Medium prompt_body + inputs section.
+    max_skill_bytes: 5000
     trigger:
       human: "on every commit that touches .iteration/goal.md"
     path_filters:
@@ -136,6 +144,8 @@ routines:
     primitive: scheduled
     execution_surface: local
     est_minutes: 5
+    # Medium prompt_body + inputs block.
+    max_skill_bytes: 4500
     trigger:
       cron: "0 18 * * *"
       human: "6:00 PM daily"
@@ -174,3 +184,7 @@ meta:
   idle_window: "always"
   gha_minutes_cap: 60
   kill_switch: false
+  # Token frugality cap on rendered per-routine SKILL.md. Routines with
+  # large prompt_bodies (commit-tests, prd-implement, meta-evolve,
+  # daily-digest) carry per-routine `max_skill_bytes` overrides.
+  max_routine_skill_bytes: 3000

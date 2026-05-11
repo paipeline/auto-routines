@@ -80,3 +80,9 @@ meta:
   anti_flap_window: 7
   default_stagnation_threshold: 7
   process_evolve_requests: true  # drain .iteration/evolve_requests.jsonl on each fire
+  # Token frugality cap on rendered per-routine SKILL.md. The shared
+  # preamble lives at `.claude/skills/_shared/preamble.md` and is cached
+  # across fires; per-routine SKILLs should stay small so cold reads
+  # don't blow the context budget. A routine with a genuinely large
+  # prompt_body may opt out via `routines[].max_skill_bytes`.
+  max_routine_skill_bytes: 3000
