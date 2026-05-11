@@ -365,7 +365,20 @@ user is never staring at a silent terminal for more than a few seconds.
 
    **6k. Two-step commit (preserves `checkpoints.md` inside the iter commit):**
    1. `git add .iteration .claude .gitignore .git/hooks/post-commit .github/workflows/auto-routines.yml 2>/dev/null; git commit -m "iter-001: install auto-routines"`
-   2. `SHA=$(git rev-parse HEAD); printf 'iter-001: %s  %s\n' "$SHA" "$(date +%Y-%m-%dT%H:%M:%S%z)" >> .iteration/checkpoints.md; git add .iteration/checkpoints.md && git commit --amend --no-edit`
+   2. Append the checkpoint row via the deterministic wrapper, then amend it into the install commit:
+      ```bash
+      python3 scripts/orchestrator.py checkpoint-append \
+          --file .iteration/checkpoints.md \
+          --sha "$(git rev-parse HEAD)" \
+          --summary "install auto-routines"
+      git add .iteration/checkpoints.md && git commit --amend --no-edit
+      ```
+      The wrapper handles iter-number resolution (`max(existing)+1`,
+      not count) and timestamp formatting (local ISO-8601 with offset,
+      never UTC `Z`) — both of which the LLM kept fat-fingering when
+      this step was a hand-rolled shell template. Pinned by
+      `tests/test_checkpoint_append.py` + the step-6k wiring drift
+      detectors in `tests/test_skill_md_step6k_wires_checkpoint_append.py`.
    3. `git push origin HEAD` — the GHA workflow can't tick on a branch GitHub doesn't have yet.
 
 ---

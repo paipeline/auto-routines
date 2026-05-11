@@ -102,10 +102,22 @@ broken installs, or routines that drift back to "analyze only."
       TestEvolveStep4Ordering, TestEvolveStep4ConfigPath,
       TestEvolveStep4PlanWiring, TestEvolveStep4ProseHygiene — the
       last one explicitly forbids the imperative "For every plan
-      line, transition the routine" prose from re-appearing). SKILL.md
-      install step 6k (the two-step iter-commit) still uses the
-      prose checkpoint-append template — harmonizing it to call the
-      wrapper is a separate slice.
+      line, transition the routine" prose from re-appearing).
+      **SKILL.md install step 6k harmonized** — the two-step iter-
+      commit no longer hand-rolls `printf 'iter-NNN: ...'`; step 6k.2
+      now invokes `checkpoint-append --file --sha --summary`. The
+      wrapper handles iter-number resolution and ISO timestamp
+      formatting, the amend trick is preserved (so the row still
+      lands inside the install commit), and a prose-hygiene drift
+      detector forbids the old printf template from re-appearing.
+      Pinned by `tests/test_skill_md_step6k_wires_checkpoint_append.py`
+      (11 invariants across TestStep6kInvokesCheckpointAppend,
+      TestStep6kRequiredFlags, TestStep6kFilePath,
+      TestStep6kStillHasTwoStepCommit, TestStep6kOrdering,
+      TestStep6kProseHygiene). The evolve flow is now fully wrapped
+      AND every step that used to hand-format a checkpoint row also
+      goes through the wrapper. No remaining harmonization debt for
+      this slice.
 - [x] Add a test that boots the post-commit hook in a sandbox and asserts the
       background routines fire (subshell exit code observable via the log).
       Shipped in `tests/test_post_commit_hook_sandbox.py` — 7 invariants
