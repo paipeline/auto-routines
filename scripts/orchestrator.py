@@ -778,7 +778,6 @@ import argparse  # noqa: E402  (intentional: keep CLI deps off the import path
 import json      # noqa: E402   for callers that just want pure functions)
 import os        # noqa: E402
 import stat      # noqa: E402  (used by install-doctor for hook exec-bit check)
-import pathlib   # noqa: E402
 import sys       # noqa: E402
 import tempfile  # noqa: E402
 

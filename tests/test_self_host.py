@@ -13,7 +13,6 @@ in lockstep.
 """
 from __future__ import annotations
 
-from pathlib import Path
 
 import yaml
 
@@ -75,7 +74,6 @@ def test_renderer_has_meta_evolve_inputs_entry():
     # cached task list, otherwise the routine doesn't know what to
     # diff against.
     block_start = text.find('"meta-evolve":')
-    block_end = text.find('"', block_start + len('"meta-evolve":') + 5)
     # Search a generous window: the next ~600 chars are the value tuple.
     block = text[block_start : block_start + 800]
     assert ".iteration/goal.md" in block, (

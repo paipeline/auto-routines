@@ -30,7 +30,7 @@ import re
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
 
 # Pinned marker — appears in every rendered dashboard body. Sync layer

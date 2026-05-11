@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import datetime as dt
 import importlib.util
-import re
 import sys
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -155,10 +154,10 @@ class TestShape:
 
     def test_pure_no_input_mutation(self, dash):
         import copy
-        s, c, l = _state(), _config(), _log()
-        snap = (copy.deepcopy(s), copy.deepcopy(c), copy.deepcopy(l))
-        dash.render_dashboard(s, c, l, now=_now())
-        assert (s, c, l) == snap
+        s, c, log_entries = _state(), _config(), _log()
+        snap = (copy.deepcopy(s), copy.deepcopy(c), copy.deepcopy(log_entries))
+        dash.render_dashboard(s, c, log_entries, now=_now())
+        assert (s, c, log_entries) == snap
 
 
 # ---------------------------------------------------------------------------
@@ -254,8 +253,8 @@ class TestStatus:
             if "75" in line and "60" in line
         ]
         assert cost_lines, (
-            f"could not find the GHA cost line in the dashboard output; "
-            f"expected a line containing both '75' (used) and '60' (cap)"
+            "could not find the GHA cost line in the dashboard output; "
+            "expected a line containing both '75' (used) and '60' (cap)"
         )
         cost_line = cost_lines[0].lower()
         loud = "⚠" in cost_lines[0] or "over" in cost_line or "exceeded" in cost_line

@@ -36,7 +36,6 @@ the data file.
 """
 from __future__ import annotations
 
-import datetime as dt
 import importlib.util
 import io
 import re

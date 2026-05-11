@@ -431,7 +431,6 @@ class TestStateIntegrity:
     ):
         """Even when nothing fires, the state file is rewritten with the
         new event_id. The CLI is not lying-by-omission about state."""
-        before_mtime = state_path.stat().st_mtime
         orch.cli_main(
             [
                 "tick",
