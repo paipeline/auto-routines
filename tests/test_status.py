@@ -118,9 +118,8 @@ def test_status_aggregates_log_for_runs_and_useful(tmp_path):
     repo = _write_repo(tmp_path, cfg, log_lines=log)
     out = status.render(cfg, repo)
     # Find the prd-implement row and parse the integers.
-    line = next(l for l in out.splitlines() if l.startswith("prd-implement"))
+    line = next(ln for ln in out.splitlines() if ln.startswith("prd-implement"))
     # Ensure runs >= 3 and useful >= 2 (the stats: prefilled 0, log adds 3 runs / 2 useful / 1 noisy).
-    parts = [p for p in line.split() if p.isdigit() or p == "ACTIVE"]
     # Format: id sched(maybe spaces) state runs useful noisy ...
     # Extract numbers safely:
     nums = [int(p) for p in line.split() if p.isdigit()]
@@ -135,7 +134,7 @@ def test_status_truncates_long_goal(tmp_path):
     repo = _write_repo(tmp_path, cfg)
     out = status.render(cfg, repo)
     # Goal line truncated with ellipsis.
-    goal_line = [l for l in out.splitlines() if l.startswith("goal:")][0]
+    goal_line = [ln for ln in out.splitlines() if ln.startswith("goal:")][0]
     assert "..." in goal_line
 
 

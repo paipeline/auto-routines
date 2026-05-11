@@ -27,13 +27,11 @@ dirs so they don't perturb the self-hosted .claude/skills/ output.
 """
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-import pytest
 import yaml
 
 

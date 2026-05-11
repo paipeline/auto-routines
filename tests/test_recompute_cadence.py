@@ -29,7 +29,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
-import textwrap
 from pathlib import Path
 
 import pytest
@@ -400,7 +399,6 @@ class TestRecomputeCadenceCli:
         # Running twice with no new entries must produce identical
         # config bytes the second time — the recompute hash hasn't
         # changed, so the writer should noop.
-        import yaml
         cfg = tmp_path / "config.yaml"
         log = tmp_path / "log.jsonl"
         ladder = orch.CADENCE_LADDERS["medium"]
