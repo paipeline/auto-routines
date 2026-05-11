@@ -9,10 +9,22 @@ directory and prints the same status block format documented in SKILL.md.
 The skill's `status` mode is just `python3 scripts/status.py` — no Claude
 analysis, no file inspection by an agent, instant output.
 
+Live-monitor flags (issue #82):
+  --watch [N]      refresh the render every N seconds (default 5). Uses
+                   ANSI escape codes to clear the screen — never spawns
+                   `os.system("clear")` (the locality contract forbids it).
+                   Ctrl-C exits cleanly.
+  --since <dur>    filter the activity tail to fires within the given
+                   duration. Accepts `30s`, `15m`, `2h`, `7d`. Bare ints
+                   and unknown units are rejected with rc=2.
+  --routine <id>   show only the named routine — current FSM state, last
+                   20 fires with outcomes + summary + PR URL when present.
+                   Unknown id error lists valid ids.
+
 Exit codes:
   0  = printed status (or `.iteration/halted.md` notice)
-  1  = no `.iteration/config.yaml` found (this repo isn't a consumer)
-  2  = config exists but is unreadable
+  1  = no `.iteration/config.yaml` found / unknown --routine id
+  2  = config exists but is unreadable / malformed --since duration
 """
 from __future__ import annotations
 
@@ -20,7 +32,8 @@ import argparse
 import json
 import re
 import sys
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 try:
@@ -31,6 +44,15 @@ except ImportError:
 
 
 STATE_ORDER = ["ACTIVE", "EVOLVING", "STAGNANT", "COMPLETED", "STOPPED", "PROPOSED"]
+
+# ANSI escape: clear screen (\033[2J) and move cursor to home (\033[H).
+# Pure stdout — no subprocess, no os.system. Required by the locality
+# contract pinned in tests/test_status.py::test_status_does_not_invoke_claude.
+ANSI_CLEAR = "\033[2J\033[H"
+
+# Sentinel used by argparse so `--watch` with no value defaults to 5 seconds
+# while still distinguishing "not passed" from "passed without value".
+_WATCH_DEFAULT_INTERVAL = 5
 
 
 def load_config(root: Path) -> dict:
@@ -101,6 +123,49 @@ def relative(ts: str | None) -> str:
     if secs < 86_400:
         return f"{secs // 3600}h {suffix}"
     return f"{secs // 86_400}d {suffix}"
+
+
+_DURATION_RE = re.compile(r"^(\d+)([smhd])$")
+_DURATION_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86_400}
+
+
+def parse_duration(s: str) -> int:
+    """Parse a duration string like `30s`, `15m`, `2h`, `7d` to seconds.
+
+    Rejects bare ints (ambiguous unit), unknown units (`5w`), the empty
+    string, and anything that doesn't match `<int><smhd>`.
+
+    Raises ValueError with a human-readable message on rejection — the
+    CLI catches that and exits rc=2 with the message.
+    """
+    if not s:
+        raise ValueError("empty duration")
+    m = _DURATION_RE.match(s.strip())
+    if not m:
+        raise ValueError(
+            f"unrecognised duration {s!r}; expected <int><unit> "
+            f"where unit is one of s/m/h/d (e.g. 30m, 2h, 7d)"
+        )
+    n = int(m.group(1))
+    unit = m.group(2)
+    return n * _DURATION_UNIT_SECONDS[unit]
+
+
+def filter_log_since(log: list[dict], since_seconds: int) -> list[dict]:
+    """Return entries whose `ts` parses and falls within the last
+    `since_seconds`. Entries with unparseable `ts` are dropped (we
+    can't tell whether they fall in the window)."""
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=since_seconds)
+    out: list[dict] = []
+    for entry in log:
+        dt = parse_iso(entry.get("ts", ""))
+        if dt is None:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        if dt >= cutoff:
+            out.append(entry)
+    return out
 
 
 def stats_for(routine: dict, log: list[dict]) -> tuple[int, int, int, str | None, str | None]:
@@ -195,59 +260,177 @@ def render(config: dict, root: Path) -> str:
     return "\n".join(lines) + "\n"
 
 
-def main(argv: list[str]) -> int:
+def _render_routine_drill_in(
+    config: dict,
+    root: Path,
+    routine_id: str,
+    since_seconds: int | None,
+    as_json: bool,
+) -> tuple[int, str]:
+    """Render the --routine drill-in view. Returns `(rc, output)`.
+
+    Issue #82 upgrades:
+    - last 20 fires (was 10);
+    - includes `pr_url` from log entries when present;
+    - unknown id error lists all valid ids;
+    - composes with `--since` to filter the recent tail.
+    """
+    routines = [r for r in config.get("routines", []) if r.get("id") == routine_id]
+    if not routines:
+        valid_ids = sorted(r.get("id", "") for r in config.get("routines", []))
+        ids_listing = ", ".join(valid_ids) if valid_ids else "(none)"
+        msg = (
+            f"status: no routine with id={routine_id!r}. "
+            f"Valid ids: {ids_listing}\n"
+        )
+        return 1, msg
+
+    log = tail_jsonl(root / ".iteration" / "log.jsonl", n=500)
+    r = routines[0]
+    runs, useful, noisy, last_outcome, last_ts = stats_for(r, log)
+    matches = [e for e in log if e.get("routine") == routine_id]
+    if since_seconds is not None:
+        matches = filter_log_since(matches, since_seconds)
+    recent = matches[-20:]
+
+    if as_json:
+        return 0, json.dumps({
+            "routine": r,
+            "runs": runs,
+            "useful": useful,
+            "noisy": noisy,
+            "last_outcome": last_outcome,
+            "last_ts": last_ts,
+            "recent": recent,
+        }, indent=2) + "\n"
+
+    out_lines = [
+        f"routine:  {r.get('id')}",
+        f"state:    {r.get('state')}",
+        f"trigger:  {(r.get('trigger') or {}).get('human')}",
+        f"purpose:  {r.get('purpose')}",
+        f"runs:     {runs}  useful: {useful}  noisy: {noisy}",
+        f"last:     {last_outcome or '—'} {relative(last_ts)}",
+    ]
+    if recent:
+        out_lines.append("recent log:")
+        for e in recent:
+            line = (
+                f"  - {e.get('ts')}  {e.get('outcome')}  "
+                f"{e.get('summary', '')}"
+            )
+            pr_url = e.get("pr_url")
+            if pr_url:
+                line += f"  [PR: {pr_url}]"
+            out_lines.append(line)
+    return 0, "\n".join(out_lines) + "\n"
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    """Build the argparse parser. Exposed for tests + the SKILL.md
+    drift detector that asserts doc <-> parser parity."""
     p = argparse.ArgumentParser(description="Print auto-routines status (no LLM).")
-    p.add_argument("--routine", help="show only one routine in detail")
+    p.add_argument(
+        "--routine",
+        help="show only one routine in detail (last 20 fires, PR URL when present)",
+    )
     p.add_argument("--root", default=".", help="repo root (default: cwd)")
     p.add_argument("--json", action="store_true", help="emit JSON instead of a table")
+    p.add_argument(
+        "--watch",
+        nargs="?",
+        const=_WATCH_DEFAULT_INTERVAL,
+        default=None,
+        type=int,
+        metavar="N",
+        help=(
+            "refresh the render every N seconds (default 5). Uses "
+            "ANSI clear-screen; Ctrl-C exits cleanly."
+        ),
+    )
+    p.add_argument(
+        "--since",
+        default=None,
+        metavar="DURATION",
+        help=(
+            "filter the activity tail to fires within DURATION "
+            "(e.g. 30s, 15m, 2h, 7d)"
+        ),
+    )
+    return p
+
+
+def _one_shot(args: argparse.Namespace, root: Path, config: dict) -> tuple[int, str, str]:
+    """Run a single render pass. Returns `(rc, stdout, stderr)`."""
+    # Apply --since up front for the table render so the activity tail
+    # respects the window.
+    if args.routine:
+        rc, out = _render_routine_drill_in(
+            config, root, args.routine, _since_seconds(args), args.json
+        )
+        return rc, out if rc == 0 else "", "" if rc == 0 else out
+
+    if args.json:
+        return 0, json.dumps({
+            "goal": config.get("goal"),
+            "mode": config.get("mode"),
+            "budget": (config.get("meta") or {}).get("budget", "medium"),
+            "routines": config.get("routines", []),
+        }, indent=2) + "\n", ""
+
+    return 0, render(config, root), ""
+
+
+def _since_seconds(args: argparse.Namespace) -> int | None:
+    if args.since is None:
+        return None
+    return parse_duration(args.since)
+
+
+def main(argv: list[str]) -> int:
+    p = _build_parser()
     args = p.parse_args(argv)
 
     root = Path(args.root).resolve()
     config = load_config(root)
 
-    if args.routine:
-        routines = [r for r in config.get("routines", []) if r.get("id") == args.routine]
-        if not routines:
-            print(f"status: no routine with id={args.routine!r}", file=sys.stderr)
-            return 1
-        log = tail_jsonl(root / ".iteration" / "log.jsonl", n=500)
-        r = routines[0]
-        runs, useful, noisy, last_outcome, last_ts = stats_for(r, log)
-        recent = [e for e in log if e.get("routine") == args.routine][-10:]
-        if args.json:
-            print(json.dumps({
-                "routine": r,
-                "runs": runs,
-                "useful": useful,
-                "noisy": noisy,
-                "last_outcome": last_outcome,
-                "last_ts": last_ts,
-                "recent": recent,
-            }, indent=2))
-            return 0
-        print(f"routine:  {r.get('id')}")
-        print(f"state:    {r.get('state')}")
-        print(f"trigger:  {(r.get('trigger') or {}).get('human')}")
-        print(f"purpose:  {r.get('purpose')}")
-        print(f"runs:     {runs}  useful: {useful}  noisy: {noisy}")
-        print(f"last:     {last_outcome or '—'} {relative(last_ts)}")
-        if recent:
-            print("recent log:")
-            for e in recent:
-                print(f"  - {e.get('ts')}  {e.get('outcome')}  {e.get('summary', '')}")
-        return 0
+    # Validate --since up front so a malformed value fails fast even
+    # in --watch mode (otherwise the user sees the error on every
+    # tick).
+    try:
+        _since_seconds(args)
+    except ValueError as e:
+        print(f"status: --since: {e}", file=sys.stderr)
+        return 2
 
-    if args.json:
-        print(json.dumps({
-            "goal": config.get("goal"),
-            "mode": config.get("mode"),
-            "budget": (config.get("meta") or {}).get("budget", "medium"),
-            "routines": config.get("routines", []),
-        }, indent=2))
-        return 0
+    if args.watch is None:
+        rc, out, err = _one_shot(args, root, config)
+        if out:
+            sys.stdout.write(out)
+        if err:
+            sys.stderr.write(err)
+        return rc
 
-    sys.stdout.write(render(config, root))
-    return 0
+    # Watch mode: clear, render, sleep, repeat. Ctrl-C exits rc=0.
+    interval = max(1, int(args.watch))
+    try:
+        while True:
+            # Re-load config each tick so changes (e.g. a routine
+            # paused via `/auto-routines stop`) reflect live.
+            config = load_config(root)
+            rc, out, err = _one_shot(args, root, config)
+            sys.stdout.write(ANSI_CLEAR)
+            if out:
+                sys.stdout.write(out)
+            if err:
+                sys.stderr.write(err)
+            sys.stdout.flush()
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        # Clean exit on Ctrl-C — print a newline so the next shell
+        # prompt is on its own line.
+        sys.stdout.write("\n")
+        return 0
 
 
 if __name__ == "__main__":

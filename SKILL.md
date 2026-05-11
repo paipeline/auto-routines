@@ -564,13 +564,24 @@ The flag `routine.self_evolve` (default true) gates (a) and (b). Set false for r
 
 ```bash
 python3 scripts/status.py            # full table
-python3 scripts/status.py --routine <id>   # one-routine drill-in
+python3 scripts/status.py --routine <id>   # one-routine drill-in (last 20 fires, PR URL if present)
 python3 scripts/status.py --json     # machine-readable
+python3 scripts/status.py --watch         # refresh every 5 s (Ctrl-C exits)
+python3 scripts/status.py --watch 2       # refresh every 2 s
+python3 scripts/status.py --since 1h      # only fires in the last hour
+python3 scripts/status.py --routine prd-implement --watch --since 30m   # composes
 ```
 
-The script reads `.iteration/config.yaml` + `.iteration/log.jsonl` + `.iteration/evolve_requests.jsonl` and renders the same status block format documented under "Status display". No file analysis, no synthesis, no Claude tokens.
+Flag reference (the per-flag tests in `tests/test_status_live_flags.py` pin doc ↔ parser parity — adding a flag to one without the other fails CI):
 
-Install copies `scripts/status.py` from the skill directory into the consumer repo (step 6a). Tests in `tests/test_status.py` pin the no-LLM contract: any change that introduces `subprocess`, network calls, or LLM invocation breaks the test suite.
+- `--routine <id>` — show only the named routine: current FSM state, last 20 fires with outcome, summary, and `pr_url` if logged. Unknown id errors with the list of valid ids.
+- `--json` — machine-readable output (composes with `--routine`).
+- `--watch [N]` — refresh every `N` seconds (default `5`). Uses ANSI clear-screen escape sequences (`\033[2J\033[H`); the locality contract forbids `os.system("clear")` and `subprocess`. Ctrl-C exits rc=0.
+- `--since <duration>` — filter the recent activity tail to fires within `<duration>`. Accepts `<int><unit>` where unit is `s`/`m`/`h`/`d` (e.g. `30s`, `15m`, `2h`, `7d`). Bare ints and unknown units exit rc=2.
+
+The script reads `.iteration/config.yaml` + `.iteration/log.jsonl` + `.iteration/evolve_requests.jsonl` and renders the same status block format documented under "Status display". No file analysis, no synthesis, no Claude tokens. In `--watch` mode, config is reloaded each tick so live FSM changes (a routine paused via `/auto-routines stop`) reflect immediately.
+
+Install copies `scripts/status.py` from the skill directory into the consumer repo (step 6a). Tests in `tests/test_status.py` pin the no-LLM contract: any change that introduces `subprocess`, network calls, or LLM invocation breaks the test suite. The drift detector in `tests/test_status_live_flags.py::TestSkillMdDocDrift` pins this section's flag list against the argparse parser — both directions.
 
 ## Mode: `test-fire <routine_id>`
 
