@@ -61,6 +61,7 @@
 #   - llm-ci-verifier        criteria-bound LLM verifier on open PRs
 #   - coverage-watcher       react to coverage regressions
 #   - secret-scan            block PR merge on leaked credentials
+#   - db-security-watcher    flag risky migrations / SQL patterns on commit
 #   - release-tag-checker    cut/check release tags after a merge
 #
 # forward-driving (progress lane — proactively advances the project):
@@ -877,6 +878,148 @@ archetypes:
 
       Never echo a credential value back in a comment. Use the
       pattern name and file:line only.
+
+  - id: db-security-watcher
+    purpose: "On commits that touch migrations or SQL, scan the diff for risky patterns (DROP COLUMN without backfill, ALTER TYPE without USING, missing FK indexes, UPDATE/DELETE without WHERE, etc.) and report findings before they ship."
+    primitive: git-hook
+    category: reactive
+    trigger_default: "on every commit that touches migration / SQL files"
+    automation_default: notify
+    self_evolve: false
+    # Issue #76 structured predicate: 30 consecutive days with no
+    # `outcome: err` from this routine. The evaluator scans
+    # .iteration/log.jsonl filtered by routine_id.
+    success_criterion:
+      kind: no-failures-n-days
+      args:
+        days: 30
+    # Path filters — same dispatch lane as commit-tests, but only
+    # fires when the user actually touched a migration / schema /
+    # SQL file. Without these filters the hook would noop on most
+    # commits and waste cron seconds.
+    path_filters:
+      - migrations/**
+      - "**/migrations/**"
+      - "**/*.sql"
+      - "**/schema.rb"
+      - "**/schema.py"
+      - "**/schema.sql"
+      - db/migrate/**
+      - prisma/migrations/**
+      - alembic/versions/**
+    # Stack hints cover the major migration tooling — Python
+    # (alembic / sqlalchemy), Node (prisma / knex), Go (gorm), Rails
+    # (`db/migrate`). The interview surfaces this archetype whenever
+    # any of these are detected in the analysis step.
+    stack_hints:
+      - alembic
+      - sqlalchemy
+      - prisma
+      - knex
+      - gorm
+      - migrations
+      - db/migrate
+    prompt_body: |
+      The user just committed code that touches a migration or SQL
+      file. Your job: scan the *added* lines of the diff for the
+      risky-pattern catalog below, and log every finding to
+      `.iteration/log.jsonl`. You do NOT rewrite the migration —
+      `automation_level: notify` means find + log. The author
+      decides whether to ship the migration anyway or refactor.
+
+      0. **Diff-only scope.** Read the current commit's diff:
+         `git diff HEAD~1..HEAD --unified=0 -- '*.sql'
+             'migrations/**' '**/migrations/**' 'db/migrate/**'
+             'prisma/migrations/**' 'alembic/versions/**'
+             'schema.{rb,py,sql}'`.
+         Full-file scans would flag every existing migration on
+         every commit. The point is to catch NEW risk, not audit
+         history.
+
+      1. **Risky-pattern catalog.** For each pattern below, scan the
+         added lines and record a finding (`pattern_id`, file:line,
+         and the offending text):
+
+         a. **`DROP COLUMN` without nullable-default backfill** —
+            removing a column in a live system breaks readers that
+            still reference it. Two-step deploys (deprecate → drop)
+            are the standard fix.
+         b. **`ALTER TYPE` / `ALTER COLUMN ... TYPE` without
+            `USING`** — Postgres needs an explicit cast or the
+            migration fails at run time (and may table-lock).
+         c. **New foreign key without an explicit index on the
+            referencing column** — FK lookups without an index
+            cause sequential scans on every join.
+         d. **`UPDATE` / `DELETE` without `WHERE`** — a missing
+            `WHERE` clause is the classic "wiped the whole table"
+            bug; flag every occurrence in migration files.
+         e. **Migration that doesn't wrap its statements in a
+            transaction** (`BEGIN; … COMMIT;` for raw SQL, or the
+            framework's transactional-migration flag) — partial
+            failures leave the schema in a torn state with no
+            rollback.
+         f. **`SELECT *` in production query files** (not
+            migrations themselves — but if the commit touches a
+            production query module, flag it). Star-selects bind
+            the schema to every reader.
+         g. **N+1 query patterns** — heuristic: a loop that calls
+            a DB function (`session.query(...)`, `User.find(...)`,
+            `prisma.*.findUnique(...)`) inside the loop body. One
+            DB call per iteration scales linearly with N.
+
+      2. **Decide severity.** Per finding, rate `high` (a-d) or
+         `medium` (e-g). High findings block downstream `auto`
+         routines (e.g. a release-tag-checker should not auto-tag
+         when this fire produced any `high` finding in the same
+         commit range — but enforcing that is the OTHER routine's
+         job; you only emit the findings).
+
+      3. **Write the findings report.**
+         `.iteration/db-security-findings-<HEAD-sha>.md` — one file
+         per commit, gitignored by convention. Format:
+         ```
+         # db-security-watcher findings
+         Commit: <sha>
+         Date: <iso8601 local>
+
+         ## high
+         - [a] DROP COLUMN without backfill — migrations/2026_05_11_drop_legacy.sql:7
+           > ALTER TABLE users DROP COLUMN legacy_id;
+           Two-step deploy: deprecate the column first, then drop in a follow-up.
+
+         ## medium
+         - [f] SELECT * in production query — src/users/repo.py:42
+           > SELECT * FROM users WHERE id = $1
+           Bind columns explicitly so a future ALTER doesn't surprise readers.
+         ```
+
+      4. **If a PR exists for the current branch**, append a
+         summary comment so the team sees the findings in review:
+         `gh pr list --head $(git branch --show-current) --json number`
+         → if non-empty, `gh pr comment <num> --body-file
+         .iteration/db-security-findings-<sha>.md`.
+         If no PR exists yet, skip — the findings file is on disk
+         for the next fire to consume when the PR opens.
+
+      5. **Log to `.iteration/log.jsonl`.**
+         - `outcome: ok, increment_signal: true` when you produced
+           any finding (high or medium).
+         - `outcome: noop, increment_signal: false` when the diff
+           was clean.
+         - `outcome: err, increment_signal: false` when the diff
+           couldn't be read (rare: detached HEAD, shallow clone).
+         Include `findings_high`, `findings_medium` integer counts
+         in the summary line so the meta-agent can chart trends.
+
+      Hard rules:
+
+      - You do NOT rewrite the migration. `automation_level:
+        notify` means find + report. The author owns the fix.
+      - You do NOT branch or commit. The findings file is written
+        directly to `.iteration/` on the current commit.
+      - You DO NOT flag patterns in lines that already existed
+        before this commit — the diff scope guarantees we only
+        catch *new* risk.
 
   - id: release-tag-checker
     purpose: "When a release commit goes in without a version bump, flag it."
