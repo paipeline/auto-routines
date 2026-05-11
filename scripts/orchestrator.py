@@ -692,6 +692,46 @@ def _make_parser() -> argparse.ArgumentParser:
         help="Path to .iteration/config.yaml",
     )
 
+    # apply-fsm-plan: write-half of the evolve flow. Consumes JSONL
+    # plan lines (the output of `fsm-plan` or a hand-crafted file) and
+    # mutates `routines[i].state` in config.yaml atomically.
+    #
+    # Pre-flight validates the WHOLE plan before touching the file —
+    # one invalid transition aborts everything, so config.yaml is
+    # never half-applied. The alternative (mutate as we go) would
+    # leave the user with a config that's neither the old nor the new
+    # FSM state, and recovery would mean hand-editing YAML.
+    #
+    # PRD `.iteration/goal.md` (Coverage and correctness): "Add tests
+    # for the `evolve` flow — drain evolve_requests.jsonl, perform
+    # the FSM transitions, write a checkpoint, apply, verify." This
+    # is the **apply** half; verify (read-back) is a separate slice.
+    apply_p = sub.add_parser(
+        "apply-fsm-plan",
+        help="Apply FSM transitions from a JSONL plan to config.yaml.",
+        description=(
+            "Read JSONL transition lines from `--plan` (or stdin via "
+            "`-`), validate every line against the current config, and "
+            "atomically rewrite config.yaml with the new states. "
+            "All-or-nothing: a single invalid transition aborts the "
+            "whole plan. Emits one JSON result record per plan line "
+            "on stdout; exit 0 iff every transition applied."
+        ),
+    )
+    apply_p.add_argument(
+        "--config",
+        required=True,
+        help="Path to .iteration/config.yaml (rewritten atomically).",
+    )
+    apply_p.add_argument(
+        "--plan",
+        required=True,
+        help=(
+            "Path to JSONL plan file, or `-` to read from stdin. Each "
+            "line: {routine_id, from, to[, reason]}."
+        ),
+    )
+
     # open-pr: deterministic wrapper around `gh pr create`. Routines and
     # the install procedure can call this instead of asking the LLM to
     # assemble the invocation. Tests mock subprocess.run to pin the
@@ -1221,6 +1261,188 @@ def _cli_fsm_plan(args, out, err) -> int:
 
     for entry in plan_entries:
         out.write(json.dumps(entry, sort_keys=True) + "\n")
+
+    return 0
+
+
+# Required fields on every plan line. Anything missing → refuse with a
+# clear error rather than guessing — fsm-plan always emits all three,
+# and a hand-edited plan that omits one is almost certainly a typo.
+_APPLY_REQUIRED_PLAN_FIELDS = ("routine_id", "from", "to")
+
+
+def _emit_apply_record(
+    out, routine_id: str, frm: str | None, to: str | None,
+    ok: bool, detail: str,
+) -> None:
+    """One JSON line per plan entry — matches the `install-doctor`
+    output shape so downstream parsers can be uniform."""
+    out.write(json.dumps({
+        "routine_id": routine_id,
+        "from": frm,
+        "to": to,
+        "ok": ok,
+        "detail": detail,
+    }, sort_keys=True) + "\n")
+
+
+def _cli_apply_fsm_plan(args, out, err) -> int:
+    """Apply FSM transitions from a JSONL plan to config.yaml.
+
+    Pure-script write-half of SKILL.md `Mode: evolve` step 5. The
+    earlier `fsm-plan` produced JSONL of `{routine_id, from, to, ...}`;
+    this command consumes those lines and rewrites config.yaml so
+    each routine's `state` matches the plan's `to`.
+
+    Validation strategy: PRE-FLIGHT every line before mutating any
+    state. If any line fails (unknown routine, `from` doesn't match
+    the current state, malformed JSON, missing required field), emit
+    failure records for the bad lines AND for any pending lines, then
+    exit non-zero WITHOUT touching config.yaml. The user fixes the
+    plan and re-runs.
+
+    Why all-or-nothing: a half-applied plan leaves the user with a
+    config that's neither the old nor the new FSM state. Recovery
+    means hand-editing YAML, which is exactly the kind of foot-gun
+    we're pulling out of the LLM prose path.
+
+    Atomic write: tempfile + os.replace via `_atomic_write_yaml`.
+    Same guarantees as every other config-mutating wrapper in this
+    file."""
+    # Load config first — a missing/malformed config is operator
+    # error and we surface it before parsing the plan.
+    try:
+        config = _load_yaml(args.config)
+    except (OSError, Exception) as e:
+        print(f"config load failed: {e}", file=err)
+        return 1
+
+    if not isinstance(config, dict):
+        print("config root must be a mapping", file=err)
+        return 1
+
+    routines = config.get("routines") or []
+    if not isinstance(routines, list):
+        print("config.routines must be a list", file=err)
+        return 1
+
+    # Index routines by id for O(1) lookup during validation. Preserve
+    # the original list order — we mutate in place rather than rebuild.
+    by_id: dict[str, dict] = {}
+    for r in routines:
+        if isinstance(r, dict) and isinstance(r.get("id"), str):
+            by_id[r["id"]] = r
+
+    # Read the plan. `--plan -` means stdin; otherwise a file path.
+    # We tolerate blank lines and `#`-prefixed comments — `fsm-plan`
+    # doesn't emit them, but a hand-edited plan might.
+    try:
+        if args.plan == "-":
+            plan_text = sys.stdin.read()
+        else:
+            plan_text = pathlib.Path(args.plan).read_text(encoding="utf-8")
+    except OSError as e:
+        print(f"plan load failed: {e}", file=err)
+        return 1
+
+    parsed: list[tuple[int, dict]] = []  # (line_number, entry)
+    parse_errors: list[tuple[int, str]] = []  # (line_number, detail)
+    for i, raw in enumerate(plan_text.splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError as e:
+            parse_errors.append((i, f"malformed JSON on plan line {i}: {e}"))
+            continue
+        if not isinstance(entry, dict):
+            parse_errors.append((i, f"plan line {i} is not a JSON object"))
+            continue
+        parsed.append((i, entry))
+
+    # Validate every parsed entry against the current config. We
+    # accumulate per-line results so the user sees the FULL picture
+    # in one apply — not "fix line 1, run again, see line 2 failed".
+    validation: list[dict] = []
+    any_failure = bool(parse_errors)
+
+    for lineno, entry in parsed:
+        rid = entry.get("routine_id")
+        frm = entry.get("from")
+        to = entry.get("to")
+        missing = [f for f in _APPLY_REQUIRED_PLAN_FIELDS if not entry.get(f)]
+        if missing:
+            validation.append({
+                "routine_id": rid or f"<line {lineno}>",
+                "from": frm, "to": to,
+                "ok": False,
+                "detail": f"plan line {lineno} missing required field(s): {missing}",
+            })
+            any_failure = True
+            continue
+
+        routine = by_id.get(rid)
+        if routine is None:
+            validation.append({
+                "routine_id": rid, "from": frm, "to": to,
+                "ok": False,
+                "detail": f"routine {rid!r} not found in config",
+            })
+            any_failure = True
+            continue
+
+        current = routine.get("state")
+        if current != frm:
+            validation.append({
+                "routine_id": rid, "from": frm, "to": to,
+                "ok": False,
+                "detail": (
+                    f"current state is {current!r}, plan expected "
+                    f"{frm!r} — plan is stale; re-run fsm-plan and "
+                    f"try again"
+                ),
+            })
+            any_failure = True
+            continue
+
+        # Valid — would-apply.
+        validation.append({
+            "routine_id": rid, "from": frm, "to": to,
+            "ok": True,
+            "detail": "valid (pending apply)" if any_failure else "applied",
+        })
+
+    if any_failure:
+        # Emit parse errors first (they don't have routine context).
+        for lineno, detail in parse_errors:
+            _emit_apply_record(
+                out, f"<line {lineno}>", None, None, False, detail,
+            )
+        # Then per-routine validation results. Flip any "valid (pending
+        # apply)" to ok:true detail "skipped (other transition failed)"
+        # so the user sees that this transition didn't land either.
+        for v in validation:
+            detail = v["detail"]
+            if v["ok"] and detail == "valid (pending apply)":
+                v = {**v, "ok": False,
+                     "detail": "skipped: another transition in this plan failed"}
+            out.write(json.dumps(v, sort_keys=True) + "\n")
+        return 1
+
+    # All clear — mutate states in place and write atomically.
+    for v in validation:
+        routine = by_id[v["routine_id"]]
+        routine["state"] = v["to"]
+
+    try:
+        _atomic_write_yaml(args.config, config)
+    except OSError as e:
+        print(f"config write failed: {e}", file=err)
+        return 1
+
+    for v in validation:
+        out.write(json.dumps(v, sort_keys=True) + "\n")
 
     return 0
 
@@ -1913,6 +2135,9 @@ def cli_main(
 
     if args.command == "fsm-plan":
         return _cli_fsm_plan(args, out, err)
+
+    if args.command == "apply-fsm-plan":
+        return _cli_apply_fsm_plan(args, out, err)
 
     if args.command == "open-pr":
         return _cli_open_pr(args, out, err)

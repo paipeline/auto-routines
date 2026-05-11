@@ -60,9 +60,26 @@ broken installs, or routines that drift back to "analyze only."
       rejects `|` in summary loudly; initializes the canonical Markdown
       table header on fresh files. Pinned by `tests/test_checkpoint_append.py`
       (11 invariants across TestFirstCheckpoint, TestSubsequentAppend,
-      TestRowFormat, TestErrorHandling). Apply, verify halves remain as
-      separate slices. SKILL.md install step 6k still uses the prose
-      template — harmonizing it to call this wrapper is a separate slice.
+      TestRowFormat, TestErrorHandling). (d) Apply half shipped as
+      `scripts/orchestrator.py apply-fsm-plan` — consumes JSONL plan
+      lines (the output of `fsm-plan` or a hand-edited file; `--plan -`
+      pipes from stdin so you can chain `fsm-plan ... | apply-fsm-plan
+      ...`) and rewrites `routines[i].state` in config.yaml. All-or-
+      nothing pre-flight: a single invalid line (unknown routine,
+      stale `from`, malformed JSON, missing required field) aborts
+      the whole plan WITHOUT touching config.yaml, so half-applied
+      configs are impossible. Atomic via `_atomic_write_yaml`; in-place
+      mutation preserves untouched routines byte-for-byte. Emits one
+      JSON result record per plan line; exit 0 iff every transition
+      lands. Pinned by `tests/test_apply_fsm_plan.py` (15 invariants
+      across TestApplyHappyPath, TestApplyAtomic, TestApplyValidation,
+      TestApplyStdin, TestApplyCli). The **verify** half — a read-back
+      check that the post-apply state actually matches what was
+      requested — is the next slice; the obvious shape is a
+      `verify-fsm-state --config --expected <jsonl>` wrapper that
+      mirrors apply's JSONL output but in the read direction. SKILL.md
+      install step 6k still uses the prose template — harmonizing it
+      to call this wrapper is a separate slice.
 - [x] Add a test that boots the post-commit hook in a sandbox and asserts the
       background routines fire (subshell exit code observable via the log).
       Shipped in `tests/test_post_commit_hook_sandbox.py` — 7 invariants
