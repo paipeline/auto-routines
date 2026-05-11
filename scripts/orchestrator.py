@@ -732,6 +732,36 @@ def _make_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # verify-fsm-state: read-side companion to `apply-fsm-plan`.
+    # Consumes the SAME JSONL plan; treats `to` as the EXPECTED
+    # current state and asserts the config matches. Closes the
+    # evolve flow's "verify" half (PRD goal.md).
+    verify_p = sub.add_parser(
+        "verify-fsm-state",
+        help="Verify config.yaml states match the expected `to` in a plan.",
+        description=(
+            "Read JSONL transition lines from `--plan` (or stdin via "
+            "`-`); for each line, assert that the routine's current "
+            "state in `--config` equals the line's `to`. Mirrors "
+            "`apply-fsm-plan`'s JSONL interface so the apply and the "
+            "verify share one plan file. Emits one JSON record per "
+            "assertion; exit 0 iff every assertion holds."
+        ),
+    )
+    verify_p.add_argument(
+        "--config",
+        required=True,
+        help="Path to .iteration/config.yaml (read-only).",
+    )
+    verify_p.add_argument(
+        "--plan",
+        required=True,
+        help=(
+            "Path to JSONL plan file, or `-` to read from stdin. Each "
+            "line: {routine_id, to, ...}. `from` is ignored by verify."
+        ),
+    )
+
     # open-pr: deterministic wrapper around `gh pr create`. Routines and
     # the install procedure can call this instead of asking the LLM to
     # assemble the invocation. Tests mock subprocess.run to pin the
@@ -1447,6 +1477,149 @@ def _cli_apply_fsm_plan(args, out, err) -> int:
     return 0
 
 
+def _cli_verify_fsm_state(args, out, err) -> int:
+    """Verify each routine's current state matches the plan's `to`.
+
+    Read-side companion to `apply-fsm-plan`. Consumes the SAME JSONL
+    plan: each line `{routine_id, to, ...}` becomes an assertion
+    "routine X must currently be in state Y". The `from` field is
+    ignored (it described the pre-apply state, which is no longer
+    relevant once the plan has been applied).
+
+    Output is one JSON record per assertion:
+        {routine_id, expected, actual, ok, detail}
+    matching the JSONL contract used by `apply-fsm-plan` and
+    `install-doctor`. Exit 0 iff every assertion holds.
+
+    A failing assertion does NOT stop processing — we evaluate every
+    line and emit results for all, so the user sees the full picture
+    in a single run. The exit code rolls up to 1 iff any record has
+    `ok: false`.
+
+    Pure read: never writes to config.yaml. Safe to run repeatedly,
+    safe to run mid-evolve, safe to run as a cron-driven drift check
+    independent of any apply step."""
+    try:
+        config = _load_yaml(args.config)
+    except (OSError, Exception) as e:
+        print(f"config load failed: {e}", file=err)
+        return 1
+
+    if not isinstance(config, dict):
+        print("config root must be a mapping", file=err)
+        return 1
+
+    routines = config.get("routines") or []
+    if not isinstance(routines, list):
+        print("config.routines must be a list", file=err)
+        return 1
+
+    by_id: dict[str, dict] = {}
+    for r in routines:
+        if isinstance(r, dict) and isinstance(r.get("id"), str):
+            by_id[r["id"]] = r
+
+    # Plan ingestion. `--plan -` reads stdin; otherwise a file path.
+    try:
+        if args.plan == "-":
+            plan_text = sys.stdin.read()
+        else:
+            plan_text = pathlib.Path(args.plan).read_text(encoding="utf-8")
+    except OSError as e:
+        print(f"plan load failed: {e}", file=err)
+        return 1
+
+    any_failure = False
+
+    for i, raw in enumerate(plan_text.splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        # Malformed JSON: emit a failure record AND set the exit-1
+        # flag. We can't even produce a routine_id for it, so the
+        # record uses a synthetic `<line N>` placeholder.
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError as e:
+            out.write(json.dumps({
+                "routine_id": f"<line {i}>",
+                "expected": None,
+                "actual": None,
+                "ok": False,
+                "detail": f"malformed JSON on plan line {i}: {e}",
+            }, sort_keys=True) + "\n")
+            any_failure = True
+            continue
+
+        if not isinstance(entry, dict):
+            out.write(json.dumps({
+                "routine_id": f"<line {i}>",
+                "expected": None,
+                "actual": None,
+                "ok": False,
+                "detail": f"plan line {i} is not a JSON object",
+            }, sort_keys=True) + "\n")
+            any_failure = True
+            continue
+
+        rid = entry.get("routine_id")
+        expected = entry.get("to")
+
+        # `routine_id` and `to` are required; `from` is informational
+        # for verify (we don't check it).
+        if not rid or not expected:
+            missing = [f for f in ("routine_id", "to") if not entry.get(f)]
+            out.write(json.dumps({
+                "routine_id": rid or f"<line {i}>",
+                "expected": expected,
+                "actual": None,
+                "ok": False,
+                "detail": (
+                    f"plan line {i} missing required field(s): {missing}"
+                ),
+            }, sort_keys=True) + "\n")
+            any_failure = True
+            continue
+
+        routine = by_id.get(rid)
+        if routine is None:
+            out.write(json.dumps({
+                "routine_id": rid,
+                "expected": expected,
+                "actual": None,
+                "ok": False,
+                "detail": f"routine {rid!r} not found in config",
+            }, sort_keys=True) + "\n")
+            any_failure = True
+            continue
+
+        actual = routine.get("state")
+        if actual == expected:
+            out.write(json.dumps({
+                "routine_id": rid,
+                "expected": expected,
+                "actual": actual,
+                "ok": True,
+                "detail": "state matches",
+            }, sort_keys=True) + "\n")
+        else:
+            out.write(json.dumps({
+                "routine_id": rid,
+                "expected": expected,
+                "actual": actual,
+                "ok": False,
+                "detail": (
+                    f"expected state {expected!r}, found {actual!r} — "
+                    f"apply step may have been skipped, partial, or "
+                    f"someone hand-edited config.yaml after apply"
+                ),
+            }, sort_keys=True) + "\n")
+            any_failure = True
+
+    return 1 if any_failure else 0
+
+
 def _cli_open_pr(args, out, err) -> int:
     """Deterministic wrapper around `gh pr create`.
 
@@ -2138,6 +2311,9 @@ def cli_main(
 
     if args.command == "apply-fsm-plan":
         return _cli_apply_fsm_plan(args, out, err)
+
+    if args.command == "verify-fsm-state":
+        return _cli_verify_fsm_state(args, out, err)
 
     if args.command == "open-pr":
         return _cli_open_pr(args, out, err)

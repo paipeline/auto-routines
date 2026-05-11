@@ -43,9 +43,11 @@ broken installs, or routines that drift back to "analyze only."
       the end-to-end install. That needs a Claude SDK harness or a
       recorded-prompt fixture — separate slice; the deterministic
       assertion target it would compose against is now in place.
-- [~] Add tests for the `evolve` flow — drain `evolve_requests.jsonl`, perform
+- [x] Add tests for the `evolve` flow — drain `evolve_requests.jsonl`, perform
       the FSM transitions, write a checkpoint, apply, verify.
-      Partial: (a) drain half shipped as `scripts/orchestrator.py drain-evolve-requests`
+      All five sub-halves shipped — the deterministic evolve pipeline
+      is end-to-end CI-covered:
+      (a) drain half shipped as `scripts/orchestrator.py drain-evolve-requests`
       (9 invariants in `TestDrainEvolveRequests`). (b) Deterministic FSM
       transition half shipped as `scripts/orchestrator.py fsm-plan` —
       ACTIVE→STAGNANT detector with per-routine + meta-default threshold
@@ -73,13 +75,26 @@ broken installs, or routines that drift back to "analyze only."
       JSON result record per plan line; exit 0 iff every transition
       lands. Pinned by `tests/test_apply_fsm_plan.py` (15 invariants
       across TestApplyHappyPath, TestApplyAtomic, TestApplyValidation,
-      TestApplyStdin, TestApplyCli). The **verify** half — a read-back
-      check that the post-apply state actually matches what was
-      requested — is the next slice; the obvious shape is a
-      `verify-fsm-state --config --expected <jsonl>` wrapper that
-      mirrors apply's JSONL output but in the read direction. SKILL.md
-      install step 6k still uses the prose template — harmonizing it
-      to call this wrapper is a separate slice.
+      TestApplyStdin, TestApplyCli). (e) Verify half shipped as
+      `scripts/orchestrator.py verify-fsm-state` — symmetric read-side
+      companion to apply. Consumes the SAME JSONL plan as apply;
+      treats each line's `to` as the EXPECTED current state and
+      asserts the config matches. Output is `{routine_id, expected,
+      actual, ok, detail}` matching the install-doctor / apply-fsm-plan
+      JSONL convention. A failing assertion does NOT short-circuit —
+      every line is evaluated and emitted so the user sees the full
+      picture; exit code rolls up to 1 iff any record has `ok:false`.
+      Pure read; safe to run repeatedly, mid-evolve, or as an
+      independent cron-driven drift check. Pinned by
+      `tests/test_verify_fsm_state.py` (12 invariants across
+      TestVerifyHappyPath, TestVerifyMismatch, TestVerifyValidation,
+      TestVerifyStdin, TestApplyVerifyRoundtrip, TestVerifyCli — the
+      round-trip class exercises apply+verify together against one
+      shared plan, which is the canonical evolve usage). The PRD's
+      evolve flow is now fully wrapped end-to-end: drain → fsm-plan →
+      apply-fsm-plan → verify-fsm-state, all deterministic, all CI-
+      mocked. SKILL.md install step 6k still uses the prose template
+      — harmonizing it to call this wrapper is a separate slice.
 - [x] Add a test that boots the post-commit hook in a sandbox and asserts the
       background routines fire (subshell exit code observable via the log).
       Shipped in `tests/test_post_commit_hook_sandbox.py` — 7 invariants
