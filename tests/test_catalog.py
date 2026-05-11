@@ -158,7 +158,9 @@ def test_catalog_header_documents_category_field(catalog):
 
 # Archetypes whose "real work" is posting comments rather than branch+commit.
 # They still must log and use increment_signal.
-COMMENT_ONLY_ARCHETYPES = {"pr-ci-watcher", "secret-scan", "pr-review-bot"}
+COMMENT_ONLY_ARCHETYPES = {
+    "pr-ci-watcher", "secret-scan", "pr-review-bot", "llm-ci-verifier",
+}
 
 
 @pytest.mark.parametrize(
