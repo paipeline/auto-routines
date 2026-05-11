@@ -168,7 +168,21 @@ broken installs, or routines that drift back to "analyze only."
       rename drift at catalog-load time rather than at routine-fire
       time. Includes a `CROSS_REFERENCE_ALLOWLIST` for legitimate cross-
       archetype mentions (meta-evolve → prd-implement, used to detect
-      in-flight work it shouldn't rip out from tasks.md).
+      in-flight work it shouldn't rip out from tasks.md). **Hook
+      timestamp format pinned** — `templates/post-commit-hook.sh` is
+      the one shell-side writer of `.iteration/log.jsonl`; if it
+      drifted to UTC `Z`, named-timezone `%Z`, or `date -u`, log entries
+      would mix formats with the orchestrator's local-with-offset
+      writes. Drift detectors in
+      `tests/test_post_commit_hook_timestamp_format.py` (6 invariants
+      across TestHookUsesCanonicalDateFormat,
+      TestHookRejectsNonCanonicalTimestampForms,
+      TestHookEmitsCanonicalLogShape) pin the canonical
+      `date +%Y-%m-%dT%H:%M:%S%z` format string, forbid the three
+      common drift forms (`date -u`, `%Z`, literal `Z` suffix), and
+      require every hook log.jsonl write to carry the `outcome`
+      field so downstream readers (status.py, dashboard, FSM
+      staleness detector) can branch deterministically.
 
 ### Catalog quality
 - [x] Add a `coverage-watcher` archetype: opens a PR when project test coverage
