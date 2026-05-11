@@ -17,38 +17,32 @@ broken installs, or routines that drift back to "analyze only."
       (`.git/hooks/post-commit` exists & executable, `.claude/skills/<id>/SKILL.md`
       filled with no `{{placeholders}}`, `.iteration/config.yaml` passes
       sanity-check). Currently the test suite only covers the schema and catalog.
-      Partial: the "no `{{placeholders}}`" half shipped as
-      `scripts/orchestrator.py render-routine-skill` — deterministic
-      placeholder substitution (previously pure-LLM in SKILL.md install
-      step 6c). Looks up archetype by `routine.id` (config and catalog
-      align by id; `prompt_skill` aliasing dropped — typos shouldn't
-      silently route to the wrong archetype). Refuses to write if any
-      `{{...}}` survives substitution; atomic write so a failed render
-      leaves no partial file. Pinned by `tests/test_render_routine_skill.py`
-      (16 invariants across TestNoPlaceholdersAfterRender,
-      TestPlaceholderSources, TestInstalledAtTimestamp, TestSelfEvolveBlock,
-      TestErrorHandling, TestAtomicWrite, TestInstallStep6cInvokesRenderWrapper).
-      SKILL.md install step 6c now invokes the wrapper directly (no
-      LLM-render fallback) — drift detector pinned in the new test
-      class. The **audit half** shipped as
-      `scripts/orchestrator.py install-doctor` — the deterministic
-      core of the PRD's "init integration test" acceptance criteria.
-      Audits a repo for: `.iteration/config.yaml` (exists + parses),
-      `.claude/skills/_shared/preamble.md` (exists), per-routine
-      `.claude/skills/<id>/SKILL.md` (exists + no `{{...}}` leftover),
-      `.git/hooks/post-commit` (exists + executable when a git-hook
-      routine is present, n/a otherwise). Emits JSONL on stdout, one
-      record per check; exit 0 iff every check passes. Pinned by
-      `tests/test_install_doctor.py` (17 invariants across
-      TestFullInstallPasses, TestMissingArtifacts, TestPlaceholderLeak,
-      TestPostCommitHook, TestOutputShape, TestModeDoctorWiring).
-      SKILL.md `Mode: doctor` exposes the wrapper to users as
-      `/auto-routines doctor` — drift-detected against future
-      moves/renames. The full `init`-against-tmp-repo integration
-      test that actually runs the interview-driven install via Claude
-      remains a separate slice — it will compose this audit with a
-      tmp-repo fixture + Claude harness, but the assertion logic is
-      now in place and reachable from the user surface.
+      **Deterministic half shipped end-to-end** in
+      `tests/test_install_integration_tmp_repo.py` (5 invariants across
+      TestScheduledOnlyInstall, TestGitHookInstall, TestPreambleSkipped):
+      composes the shipped wrappers (`render-routine-skill` +
+      `install-doctor` + a templates-copy step for the post-commit hook)
+      against a real tmp git repo via pytest's `tmp_path`. Asserts the
+      full chain produces a clean `install-doctor` audit for both the
+      scheduled-only and the git-hook+scheduled configs; negative cases
+      pin the failure modes (forgot the post-commit hook → fails;
+      forgot the preamble render → fails). Wrappers it composes (all
+      previously shipped):
+      `scripts/orchestrator.py render-routine-skill` (deterministic
+      placeholder substitution; archetype lookup by `routine.id`;
+      refuses to write if any `{{...}}` survives; atomic write; pinned
+      by `tests/test_render_routine_skill.py`'s 16 invariants);
+      `scripts/orchestrator.py install-doctor` (audits config.yaml,
+      preamble, per-routine SKILL.md, post-commit hook; JSONL output;
+      exit 0 iff all checks pass; pinned by
+      `tests/test_install_doctor.py`'s 17 invariants);
+      SKILL.md `Mode: doctor` exposes the audit as
+      `/auto-routines doctor` (drift-detected). What remains is the
+      **LLM-driven half**: an actual Claude-harness test that runs
+      `/auto-routines` interview-style against a tmp repo and verifies
+      the end-to-end install. That needs a Claude SDK harness or a
+      recorded-prompt fixture — separate slice; the deterministic
+      assertion target it would compose against is now in place.
 - [~] Add tests for the `evolve` flow — drain `evolve_requests.jsonl`, perform
       the FSM transitions, write a checkpoint, apply, verify.
       Partial: (a) drain half shipped as `scripts/orchestrator.py drain-evolve-requests`
