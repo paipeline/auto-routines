@@ -312,6 +312,16 @@ def check(config: dict) -> list[str]:
             em = r["est_minutes"]
             if not isinstance(em, int) or isinstance(em, bool) or em < 1:
                 errors.append(f"{prefix} est_minutes must be a positive integer")
+        # max_skill_bytes (PRD #10 / slice 1): per-routine override for
+        # the meta.max_routine_skill_bytes cap. Used when a routine's
+        # prompt_body is genuinely large enough to push the rendered
+        # SKILL.md past the default 3000-byte ceiling.
+        if "max_skill_bytes" in r:
+            msb = r["max_skill_bytes"]
+            if not isinstance(msb, int) or isinstance(msb, bool) or msb < 1:
+                errors.append(
+                    f"{prefix} max_skill_bytes must be a positive integer"
+                )
         # 6. trigger fields per primitive
         trig = r.get("trigger", {}) or {}
         # human-readable schedule must be present when cron is (schema 3+)
@@ -415,6 +425,15 @@ def check(config: dict) -> list[str]:
             errors.append("meta.gha_minutes_cap must be a positive integer")
     if "kill_switch" in meta and not isinstance(meta["kill_switch"], bool):
         errors.append("meta.kill_switch must be a bool")
+    # PRD #10 / slice 1: token-frugality cap on rendered per-routine
+    # SKILL.md. Default lives in the renderer, but the field is opt-in
+    # here so a config can dial it down (cheaper) or up (more headroom).
+    if "max_routine_skill_bytes" in meta:
+        mrsb = meta["max_routine_skill_bytes"]
+        if not isinstance(mrsb, int) or isinstance(mrsb, bool) or mrsb < 1:
+            errors.append(
+                "meta.max_routine_skill_bytes must be a positive integer"
+            )
 
     # 12. neutralized_tasks (optional, but if present must be a list of dicts)
     nts = config.get("neutralized_tasks", [])
