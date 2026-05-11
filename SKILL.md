@@ -450,20 +450,37 @@ Fully auto. Every change is checkpointed and sanity-checked.
    - Read `.iteration/config.yaml`
    - `gh run list --limit 20` for CI failures
 4. **Run automatic FSM transitions** before deciding new changes:
-   - **ACTIVE → STAGNANT (deterministic — invoke the pure-script
-     emitter, don't eyeball the math)**:
+   - **ACTIVE → STAGNANT (deterministic — invoke the three-leg
+     pipeline, don't eyeball the math or hand-edit YAML)**:
      ```bash
-     python3 scripts/orchestrator.py fsm-plan --config .iteration/config.yaml
+     # 1. Emit the plan as JSONL — one line per stagnant routine.
+     python3 scripts/orchestrator.py fsm-plan \
+         --config .iteration/config.yaml \
+         > .iteration/fsm-plan.jsonl
+
+     # 2. Atomically apply the plan to config.yaml. All-or-nothing:
+     #    a single invalid line aborts the whole apply.
+     python3 scripts/orchestrator.py apply-fsm-plan \
+         --config .iteration/config.yaml \
+         --plan .iteration/fsm-plan.jsonl
+
+     # 3. Verify the apply landed (round-trip check). Exits non-zero
+     #    iff any routine's post-apply state differs from the plan.
+     python3 scripts/orchestrator.py verify-fsm-state \
+         --config .iteration/config.yaml \
+         --plan .iteration/fsm-plan.jsonl
      ```
-     Each non-comment stdout line is a JSON object
-     `{routine_id, from, to, reason}` — one per stagnant routine.
-     For every plan line, transition the routine `state: ACTIVE →
-     STAGNANT` and neutralize its schedule (anti-flap pattern from
-     Guardrail 8). Surface the `reason` field in the user-facing
-     `iter-NNN.md` log. The subcommand resolves thresholds per-routine
-     first, then `meta.default_stagnation_threshold`, then a built-in
-     default of 7. Pinned by
-     `tests/test_orchestrator_cli.py::TestFsmPlan`.
+     `apply-fsm-plan` mutates `routines[i].state` for every plan line
+     and neutralizes schedules per the anti-flap pattern (Guardrail
+     8); `verify-fsm-state` reads the config back and asserts each
+     transition landed. Surface the `reason` field from each plan
+     line in the user-facing `iter-NNN.md` log. Threshold resolution
+     (`fsm-plan` step 1): per-routine `stagnation_threshold` first,
+     then `meta.default_stagnation_threshold`, then a built-in
+     default of 7. Pinned by `tests/test_orchestrator_cli.py::TestFsmPlan`,
+     `tests/test_apply_fsm_plan.py`, and `tests/test_verify_fsm_state.py`.
+     The hand-edit-the-YAML path is deprecated — every leg is
+     deterministic and CI-mocked.
    - **ACTIVE → COMPLETED (LLM territory — natural-language match
      between `success_criterion` and signals)**: for each ACTIVE
      routine, check `success_criterion` against signals. If verifiably

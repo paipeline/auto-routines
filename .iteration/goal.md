@@ -93,8 +93,19 @@ broken installs, or routines that drift back to "analyze only."
       shared plan, which is the canonical evolve usage). The PRD's
       evolve flow is now fully wrapped end-to-end: drain → fsm-plan →
       apply-fsm-plan → verify-fsm-state, all deterministic, all CI-
-      mocked. SKILL.md install step 6k still uses the prose template
-      — harmonizing it to call this wrapper is a separate slice.
+      mocked. **SKILL.md `Mode: evolve` step 4 harmonized** — the
+      deterministic ACTIVE→STAGNANT bullet now invokes the three-leg
+      pipeline directly (fsm-plan → apply-fsm-plan → verify-fsm-state)
+      instead of telling the LLM to "transition the routine state"
+      in prose. Pinned by `tests/test_skill_md_evolve_wires_apply_verify.py`
+      (10 invariants across TestEvolveStep4Pipeline,
+      TestEvolveStep4Ordering, TestEvolveStep4ConfigPath,
+      TestEvolveStep4PlanWiring, TestEvolveStep4ProseHygiene — the
+      last one explicitly forbids the imperative "For every plan
+      line, transition the routine" prose from re-appearing). SKILL.md
+      install step 6k (the two-step iter-commit) still uses the
+      prose checkpoint-append template — harmonizing it to call the
+      wrapper is a separate slice.
 - [x] Add a test that boots the post-commit hook in a sandbox and asserts the
       background routines fire (subshell exit code observable via the log).
       Shipped in `tests/test_post_commit_hook_sandbox.py` — 7 invariants
