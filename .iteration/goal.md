@@ -195,6 +195,19 @@ broken installs, or routines that drift back to "analyze only."
       table to the canonical sets — adding/removing/renaming a state
       now fails at test-time, not at runtime when a routine reads
       its own state from config.yaml and doesn't know what to do.
+      **Log.jsonl shape pinned to readers** — the preamble's canonical
+      JSON block documents the writer's contract; status.py and
+      dashboard.py read those same fields. Drift detectors in
+      `tests/test_log_shape_pinned_to_canonical.py` (10 invariants
+      across TestPreambleCanonicalBlockHasEssentialFields,
+      TestReaderFieldsAreDocumented, TestOutcomeEnumParity) bind the
+      reader's `.get("X")` field set to the documented field set, and
+      the writer's literal outcome values (orchestrator, hook) +
+      reader's branching outcome values (status.py) to the documented
+      `ok|noop|warn|err` enum. Catches silent-None drift (reader
+      adds a field, preamble doesn't document it, LLM writers don't
+      produce it) and unreachable-branch drift (reader checks for an
+      outcome value the preamble doesn't list, so it can never fire).
 
 ### Catalog quality
 - [x] Add a `coverage-watcher` archetype: opens a PR when project test coverage
