@@ -190,31 +190,43 @@ class TestGhFailureTolerance:
     def test_script_does_not_crash_when_gh_missing(self, tmp_path, monkeypatch):
         """If `gh` is not on PATH the script must still exit 0 — the
         whole point of the shell variant is to be a strict superset
-        of reliability vs. the LLM variant."""
-        # Stub PATH so `gh` can't be found.
-        bin_dir = tmp_path / "_empty_bin"
-        bin_dir.mkdir()
-        # Build a PATH that only contains common shell builtins, no gh.
-        # We want `bash`, `git`, etc. present so we copy known dirs but
-        # explicitly exclude any directory containing `gh`.
+        of reliability vs. the LLM variant.
+
+        Strategy: resolve bash + git to absolute paths up front so the
+        subprocess doesn't need PATH to find them. Then build a PATH
+        whose contents *exclude any directory containing `gh`*. On
+        Ubuntu CI bash, git and gh frequently share `/usr/bin`, so
+        stripping that directory wholesale would also remove bash —
+        hence the absolute-path approach.
+        """
+        bash_path = shutil.which("bash")
+        if bash_path is None:
+            pytest.skip("bash not available on PATH — cannot run shell script test")
+        # We also need `git` reachable from inside the script.
+        git_path = shutil.which("git")
+        if git_path is None:
+            pytest.skip("git not available on PATH — script needs it")
+
+        # Build a PATH that excludes any directory containing `gh`,
+        # but ALWAYS keep the directory holding `git` so the script's
+        # internal `git log` invocations still work.
         original_path = os.environ.get("PATH", "")
+        git_dir = str(Path(git_path).parent)
         safe_dirs = []
         for d in original_path.split(":"):
             if not d:
                 continue
-            gh_candidate = Path(d) / "gh"
-            if gh_candidate.exists():
+            if (Path(d) / "gh").exists():
                 continue
             safe_dirs.append(d)
-        # If gh was on PATH everywhere, we still want at least bash+git.
-        # Fall back to the original PATH but rename gh lookups via
-        # `command -v` returning false — easiest: just run with --no-gh.
-        # But the test name pins missing-gh behavior, so use the safe PATH.
+        if git_dir not in safe_dirs:
+            safe_dirs.append(git_dir)
         env = os.environ.copy()
-        env["PATH"] = ":".join(safe_dirs) if safe_dirs else original_path
+        env["PATH"] = ":".join(safe_dirs)
+
         _init_git(tmp_path)
         result = subprocess.run(
-            ["bash", str(SCRIPT), "00:00 today"],
+            [bash_path, str(SCRIPT), "00:00 today"],
             cwd=tmp_path,
             capture_output=True,
             text=True,
