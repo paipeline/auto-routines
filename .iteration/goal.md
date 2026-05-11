@@ -158,7 +158,17 @@ broken installs, or routines that drift back to "analyze only."
       TestDailyDigestBothBudgetPathsWired). Excluded: pr-ci-watcher,
       pr-review-bot, secret-scan — these comment on existing PRs via
       `gh pr comment` / `gh pr review`, they don't open PRs, so open-pr
-      doesn't apply.
+      doesn't apply. **Branch-name convention pinned** — all 8 open-pr-
+      invoking archetypes already use `routines/<archetype-id>` for both
+      the `--head` value and the branch-creation step (git checkout -B /
+      Branch: line). Drift detectors in
+      `tests/test_catalog_branch_name_matches_id.py` (4 invariants across
+      TestOpenPrHeadMatchesArchetypeId, TestRoutinesBranchReferences-
+      MatchArchetypeId, TestOpenPrArchetypeCreatesBranchFirst) catch
+      rename drift at catalog-load time rather than at routine-fire
+      time. Includes a `CROSS_REFERENCE_ALLOWLIST` for legitimate cross-
+      archetype mentions (meta-evolve → prd-implement, used to detect
+      in-flight work it shouldn't rip out from tasks.md).
 
 ### Catalog quality
 - [x] Add a `coverage-watcher` archetype: opens a PR when project test coverage
