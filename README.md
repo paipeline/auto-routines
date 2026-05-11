@@ -1,3 +1,15 @@
+```
+  ┌──────────────────────────────────────────────────────────────┐
+  │  $ auto-routines  ▸ init                                     │
+  │    ┄┄┄┄┄┄┄┄┄┄┄┄┄                                             │
+  │    ╔═╗╦ ╦╔╦╗╔═╗   ╦═╗╔═╗╦ ╦╔╦╗╦╔╗╔╔═╗╔═╗                     │
+  │    ╠═╣║ ║ ║ ║ ║───╠╦╝║ ║║ ║ ║ ║║║║║╣ ╚═╗                     │
+  │    ╩ ╩╚═╝ ╩ ╚═╝   ╩╚═╚═╝╚═╝ ╩ ╩╝╚╝╚═╝╚═╝                     │
+  │                                                              │
+  │    always-on agents for your git repo   ▮                    │
+  └──────────────────────────────────────────────────────────────┘
+```
+
 # auto-routines
 
 [![CI](https://github.com/paipeline/auto-routines/actions/workflows/ci.yml/badge.svg)](https://github.com/paipeline/auto-routines/actions/workflows/ci.yml)
