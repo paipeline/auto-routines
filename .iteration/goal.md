@@ -145,7 +145,20 @@ broken installs, or routines that drift back to "analyze only."
       TestArchetypePromptBodyInvokesOpenPr, TestArchetypeOpenPrRequiredFlags,
       TestNoArchetypeAssemblesGhPrCreateByHand, TestOpenPrInvokedViaOrchestrator
       — per-archetype + global regression guard against any re-emergence
-      of `gh pr create` in prompt_body).
+      of `gh pr create` in prompt_body). **Prose-PR archetypes also
+      wired** — 4 additional archetypes that described PR-opening in
+      prose without specifying the invocation (daily-digest, weekly-dep-
+      audit, coverage-watcher, release-tag-checker) now call the wrapper
+      explicitly. daily-digest wires both budget paths (low/medium fast
+      path + high/custom LLM path); coverage-watcher wires both PR
+      branches (fixable + tracking). Pinned by
+      `tests/test_catalog_prose_pr_uses_open_pr.py` (22 invariants across
+      TestProsePrArchetypeInvokesOpenPr, TestProsePrArchetypeOpenPrRequiredFlags,
+      TestProsePrArchetypeUsesOrchestrator, TestCoverageWatcherBothScenariosWired,
+      TestDailyDigestBothBudgetPathsWired). Excluded: pr-ci-watcher,
+      pr-review-bot, secret-scan — these comment on existing PRs via
+      `gh pr comment` / `gh pr review`, they don't open PRs, so open-pr
+      doesn't apply.
 
 ### Catalog quality
 - [x] Add a `coverage-watcher` archetype: opens a PR when project test coverage

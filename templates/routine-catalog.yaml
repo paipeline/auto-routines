@@ -381,8 +381,14 @@ archetypes:
          - Read `meta.budget` from `.iteration/config.yaml`.
          - If `meta.budget` is `low` or `medium`:
              - Run `bash scripts/daily-digest.sh "00:00 today" > .iteration/digests/$(date +%Y-%m-%d).md`.
-             - Commit the digest on `routines/daily-digest` and open a PR
-               (or push to main if `config.yaml > daily_digest.push_direct: true`).
+             - Commit the digest on `routines/daily-digest`. Then open a
+               PR via `python3 scripts/orchestrator.py open-pr
+               --head routines/daily-digest --title 'chore(digest):
+               <YYYY-MM-DD> daily digest' --body '<digest body — top
+               commits, PR activity, routine outcomes>'` (or push
+               directly to main if `config.yaml > daily_digest.push_direct:
+               true`). The wrapper auto-resolves `--base` from origin's
+               default branch.
              - Log outcome with `increment_signal: true` and EXIT — do not
                run the LLM flow below. The whole point of low/medium is
                zero Claude tokens for the digest body.
@@ -397,8 +403,13 @@ archetypes:
          ## PRs       — opened, merged, still-open-failing
          ## Routines  — what fired, what was useful, what was noisy
          ## Tomorrow  — top 3 things blocking progress (your judgment)
-      3. Commit the digest on branch `routines/daily-digest` and open a PR
-         (or push directly to main if config.yaml > daily_digest.push_direct: true).
+      3. Commit the digest on branch `routines/daily-digest`. Then open a
+         PR via `python3 scripts/orchestrator.py open-pr
+         --head routines/daily-digest --title 'chore(digest): <YYYY-MM-DD>
+         daily digest' --body '<digest body — summarize the four sections
+         above>'` (or push directly to main if
+         `config.yaml > daily_digest.push_direct: true`). The wrapper
+         auto-resolves `--base` from origin's default branch.
       4. Log outcome with `increment_signal: true` if there was any activity
          today, false on empty days.
 
@@ -423,7 +434,12 @@ archetypes:
       3. For critical+high:
          a. Read the advisory. Determine if a non-breaking patch version exists.
          b. If yes: bump the version in the manifest. Run tests. If green,
-            branch `routines/weekly-dep-audit`, commit, PR with the advisory link.
+            branch `routines/weekly-dep-audit`, commit, then open a PR via
+            `python3 scripts/orchestrator.py open-pr
+            --head routines/weekly-dep-audit --title 'fix(deps): bump
+            <package> to <version> (<severity> advisory)' --body '<advisory
+            link, affected packages, test results>'`. The wrapper
+            auto-resolves `--base` from origin's default branch.
          c. If no (requires major bump): write a TODO file under
             `.iteration/proposals/dep-audit-<date>.md` with the affected
             packages, severity, and migration notes. Do not auto-bump majors.
@@ -601,15 +617,21 @@ archetypes:
       5. Branch `routines/coverage-watcher`. Decide one of:
          a. **Fixable in one fire**: gap is ≤ 3 files, each ≤ ~30 lines
             uncovered. Write the tests, commit
-            `test(<scope>): cover <module> back to threshold`, and open
-            a PR titled `Restore coverage to <pct>% (<gap_pct>% drop)`.
+            `test(<scope>): cover <module> back to threshold`, then open
+            a PR via `python3 scripts/orchestrator.py open-pr
+            --head routines/coverage-watcher --title 'Restore coverage to
+            <pct>% (<gap_pct>% drop)' --body '<which files were newly
+            covered, before/after pct, link to triggering commit>'`. The
+            wrapper auto-resolves `--base` from origin's default branch.
          b. **Tracking PR**: gap is larger. Commit a single file
             `.iteration/coverage-watcher-todo.md` listing every
             uncovered new path with file:line, ordered by lines uncovered.
-            Open a PR titled `Coverage regression: <pct>% (threshold <thresh>%)`
-            with the task list in the body. Subsequent fires update the
-            same file rather than opening duplicate PRs (keyed on
-            branch `routines/coverage-watcher`).
+            Open a PR via `python3 scripts/orchestrator.py open-pr
+            --head routines/coverage-watcher --title 'Coverage regression:
+            <pct>% (threshold <thresh>%)' --body '<the task list from
+            coverage-watcher-todo.md, ordered by lines uncovered>'`.
+            Subsequent fires update the same file rather than opening
+            duplicate PRs (keyed on branch `routines/coverage-watcher`).
       6. Update `.iteration/coverage-watcher-state.json` with the new
          baseline (current coverage pct, per-file pct map).
       7. Log outcome to `.iteration/log.jsonl`. `increment_signal: true`
@@ -708,7 +730,12 @@ archetypes:
             ii.  Bump patch by default (or whatever config.yaml > release.bump
                  says: patch | minor | none).
             iii. Commit `chore(release): bump version to X.Y.Z`.
-            iv.  Open PR titled "Missed version bump for <release SHA>".
+            iv.  Open PR via `python3 scripts/orchestrator.py open-pr
+                 --head routines/release-tag-checker --title 'Missed
+                 version bump for <release SHA>' --body '<which file was
+                 bumped, prior version, new version, link to release
+                 commit>'`. The wrapper auto-resolves `--base` from
+                 origin's default branch.
             v.   Log `increment_signal: true`.
          c. If version was bumped, log `outcome: ok, increment_signal: false`.
       3. For non-release commits, exit immediately.
