@@ -1,5 +1,5 @@
 {
-  "gha_minutes_reset_date": "2026-06-17",
+  "gha_minutes_reset_date": "2026-06-18",
   "gha_minutes_used_today": 0,
   "kill_switch_active": false,
   "last_dispatch": {
@@ -19,6 +19,6 @@
       "ts": "2026-05-11T12:27:35+0000"
     }
   },
-  "last_event_id": 481,
+  "last_event_id": 482,
   "schema_version": 1
 }
